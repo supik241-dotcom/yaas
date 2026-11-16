@@ -628,15 +628,16 @@ class _SinglePageState extends State<SinglePage> {
                                         .center,
 
                                 children: [
-                                  Icon(
-                                    selected
+                                  SizedBox(
+                                    width: 24,
+                                    height: 24,
+                                    child: selected
                                         ? destinations[
                                                 index]
                                             .selectedIcon
                                         : destinations[
                                                 index]
                                             .icon,
-                                    size: 22,
                                   ),
 
                                   const SizedBox(
