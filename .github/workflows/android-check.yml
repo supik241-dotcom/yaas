@@ -26,6 +26,12 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rinf CLI
+        run: cargo install rinf_cli --locked
+
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -39,7 +45,12 @@ jobs:
         run: flutter pub get
 
       - name: Generate Rinf bindings
-        run: dart run rinf gen
+        run: rinf gen
+
+      - name: Check generated files
+        run: |
+          test -f lib/src/bindings/bindings.dart
+          test -f lib/src/bindings/signals/signals.dart
 
       - name: Build APK
         run: flutter build apk --debug
@@ -51,4 +62,3 @@ jobs:
           path: build/app/outputs/flutter-apk/app-debug.apk
           if-no-files-found: error
           retention-days: 7
-
