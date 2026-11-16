@@ -633,10 +633,8 @@ class _SinglePageState extends State<SinglePage> {
                                         ? destinations[
                                                 index]
                                             .selectedIcon
-                                            .icon
                                         : destinations[
                                                 index]
-                                            .icon
                                             .icon,
                                     size: 22,
                                   ),
