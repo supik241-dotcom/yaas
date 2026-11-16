@@ -54,7 +54,7 @@ jobs:
       - name: Build APK
         run: flutter build apk --debug
 
-      - name: Verify APK
+         - name: Verify APK
         run: |
           APK=build/app/outputs/flutter-apk/app-debug.apk
           test -s "$APK"
@@ -62,16 +62,10 @@ jobs:
           unzip -t "$APK"
           sha256sum "$APK"
 
-      - name: Create ZIP
-        run: |
-          cd build/app/outputs/flutter-apk
-          zip -9 yaas-android-debug.zip app-debug.apk
-          unzip -t yaas-android-debug.zip
-
-      - name: Upload APK ZIP
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: yaas-android-debug
-          path: build/app/outputs/flutter-apk/yaas-android-debug.zip
+          name: yaas-android-debug-apk
+          path: build/app/outputs/flutter-apk/app-debug.apk
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 7   
