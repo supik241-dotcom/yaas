@@ -1,3 +1,4 @@
+
 import 'dart:async';
 import 'dart:ui';
 
@@ -12,7 +13,7 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:video_player_media_kit/video_player_media_kit.dart';
 import 'src/l10n/app_localizations.dart';
 import 'package:rinf/rinf.dart';
-import 'package:toastification/toastification.dart'; // TODO: find an alternative
+import 'package:toastification/toastification.dart';
 import 'src/bindings/bindings.dart' as messages;
 import 'widgets/screens/error_screen.dart';
 import 'widgets/common/drag_drop_overlay.dart';
@@ -33,14 +34,29 @@ import 'widgets/dialogs/active_tasks_close_dialog.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await FilePicker.skipEntitlementsChecks();
-  await DesktopWindow.setMinWindowSize(const Size(800, 650));
 
-  VideoPlayerMediaKit.ensureInitialized(
-    macOS: true,
-    windows: true,
-    linux: true,
-  );
+  final platform = defaultTargetPlatform;
+
+  final isDesktop =
+      platform == TargetPlatform.windows ||
+      platform == TargetPlatform.macOS ||
+      platform == TargetPlatform.linux;
+
+  // macOS-specific FilePicker initialization.
+  if (platform == TargetPlatform.macOS) {
+    await FilePicker.skipEntitlementsChecks();
+  }
+
+  // Desktop-only window initialization.
+  if (isDesktop) {
+    await DesktopWindow.setMinWindowSize(const Size(800, 650));
+
+    VideoPlayerMediaKit.ensureInitialized(
+      macOS: true,
+      windows: true,
+      linux: true,
+    );
+  }
 
   runApp(
     MultiProvider(
@@ -92,7 +108,6 @@ void main() async {
     }
   });
 
-  // Receive core build/version info
   messages.AppVersionInfo.rustSignalStream.listen((pack) {
     final info = pack.message;
     final appState = YAASApp.navigatorKey.currentContext?.read<AppState>();
@@ -124,7 +139,6 @@ class _YAASAppState extends State<YAASApp> {
       onExitRequested: _handleExitRequested,
     );
 
-    // Best-effort read of KDE accent color on Linux
     _maybeLoadLinuxAccent();
   }
 
@@ -138,7 +152,6 @@ class _YAASAppState extends State<YAASApp> {
   Widget build(BuildContext context) {
     return ToastificationWrapper(
       config: ToastificationConfig(
-        // Increase the bottom margin for the toast notifications
         marginBuilder: (context, alignment) {
           final y = alignment.resolve(Directionality.of(context)).y;
 
@@ -154,22 +167,30 @@ class _YAASAppState extends State<YAASApp> {
           final settings = context.watch<SettingsState>().settings;
           final seed = app_theme.seedFromKey(settings.seedColorKey);
 
-          // If system color is enabled, prefer dynamic ColorScheme; otherwise use seed
           final ColorScheme lightScheme;
           final ColorScheme darkScheme;
+
           if (settings.useSystemColor) {
             final fallbackSeed = _linuxKdeAccent ?? seed;
             lightScheme = lightDynamic ??
                 ColorScheme.fromSeed(
-                    seedColor: fallbackSeed, brightness: Brightness.light);
+                  seedColor: fallbackSeed,
+                  brightness: Brightness.light,
+                );
             darkScheme = darkDynamic ??
                 ColorScheme.fromSeed(
-                    seedColor: fallbackSeed, brightness: Brightness.dark);
+                  seedColor: fallbackSeed,
+                  brightness: Brightness.dark,
+                );
           } else {
             lightScheme = ColorScheme.fromSeed(
-                seedColor: seed, brightness: Brightness.light);
+              seedColor: seed,
+              brightness: Brightness.light,
+            );
             darkScheme = ColorScheme.fromSeed(
-                seedColor: seed, brightness: Brightness.dark);
+              seedColor: seed,
+              brightness: Brightness.dark,
+            );
           }
 
           ThemeMode themeMode;
@@ -187,7 +208,8 @@ class _YAASAppState extends State<YAASApp> {
 
           return MaterialApp(
             navigatorKey: YAASApp.navigatorKey,
-            onGenerateTitle: (context) => AppLocalizations.of(context).appTitle,
+            onGenerateTitle: (context) =>
+                AppLocalizations.of(context).appTitle,
             locale: context.watch<SettingsState>().locale,
             localizationsDelegates: const [
               AppLocalizations.delegate,
@@ -218,8 +240,10 @@ class _YAASAppState extends State<YAASApp> {
   Future<void> _maybeLoadLinuxAccent() async {
     if (_triedReadLinuxAccent) return;
     _triedReadLinuxAccent = true;
+
     final color = await app_theme.readKdeAccent();
     if (!mounted) return;
+
     if (color != null) {
       setState(() => _linuxKdeAccent = color);
     }
@@ -229,18 +253,23 @@ class _YAASAppState extends State<YAASApp> {
     if (_exitRequestInProgress) {
       return AppExitResponse.cancel;
     }
-    _exitRequestInProgress = true;
 
+    _exitRequestInProgress = true;
     var shouldExit = false;
+
     try {
       final activeTaskCount = context.read<TaskState>().activeTasks.length;
+
       if (activeTaskCount > 0) {
         final dialogContext = YAASApp.navigatorKey.currentContext;
+
         if (dialogContext == null) {
           debugPrint(
-              '[Shutdown] Navigator is not ready to confirm application exit');
+            '[Shutdown] Navigator is not ready to confirm application exit',
+          );
           return AppExitResponse.cancel;
         }
+
         shouldExit = await showActiveTasksCloseDialog(
           context: dialogContext,
           activeTaskCount: activeTaskCount,
@@ -268,12 +297,14 @@ class _YAASAppState extends State<YAASApp> {
     final ready = messages.AppShutdownReady.rustSignalStream.first.timeout(
       _shutdownWatchdog,
     );
+
     messages.AppShutdownRequest(
       installUpdate: context.read<AppUpdateState>().installOnExit,
     ).sendSignalToRust();
 
     try {
       final result = (await ready).message;
+
       if (result.timedOut) {
         debugPrint(
           '[Shutdown] Timed out with ${result.remainingTasks} tasks remaining',
@@ -305,48 +336,57 @@ class _SinglePageState extends State<SinglePage> {
     final appState = context.watch<AppState>();
     final settingsState = context.watch<SettingsState>();
     final allPages = AppPageRegistry.pages;
+
     final showDownloaderPages = settingsState.isDownloaderAvailable ||
         settingsState.isDownloaderInitializing ||
         settingsState.downloaderError != null;
+
     final showDonationPages = settingsState.isDownloaderAvailable &&
         settingsState.isDownloaderDonationConfigured;
+
     List<AppPageDefinition> pageDefinitions = allPages;
+
     if (!showDownloaderPages) {
       pageDefinitions =
           pageDefinitions.where((p) => p.key != 'downloads').toList();
     }
+
     if (!showDonationPages) {
       pageDefinitions =
           pageDefinitions.where((p) => p.key != 'donate').toList();
     }
+
     final destinations = pageDefinitions
         .map((page) => page.toNavigationDestination(l10n))
         .toList();
 
-    // Apply startup page once when settings are loaded.
     if (!_startupApplied && settingsState.hasLoaded) {
       final startupKey = settingsState.settings.startupPageKey;
       final hasStartupPage =
           pageDefinitions.any((page) => page.key == startupKey);
+
       if (hasStartupPage) {
         _currentPageKey = startupKey;
       }
+
       _startupApplied = true;
     }
 
-    // Handle external navigation requests
     final requestedPageKey = appState.takeNavigationRequest();
+
     if (requestedPageKey != null) {
       final hasRequestedPage =
           pageDefinitions.any((page) => page.key == requestedPageKey);
+
       if (hasRequestedPage) {
         _currentPageKey = requestedPageKey;
       } else {
-        debugPrint("ERROR: Requested page key \"$requestedPageKey\" not found");
+        debugPrint(
+          'ERROR: Requested page key "$requestedPageKey" not found',
+        );
       }
     }
 
-    // Ensure we always have a valid current page key.
     if (_currentPageKey == null ||
         !pageDefinitions.any((page) => page.key == _currentPageKey)) {
       if (pageDefinitions.isNotEmpty) {
@@ -354,52 +394,60 @@ class _SinglePageState extends State<SinglePage> {
           (page) => page.key == 'home',
           orElse: () => pageDefinitions.first,
         );
+
         _currentPageKey = homePage.key;
       }
     }
 
-    final pageIndex = _pageIndexForKey(_currentPageKey!, pageDefinitions) ?? 0;
+    final pageIndex =
+        _pageIndexForKey(_currentPageKey!, pageDefinitions) ?? 0;
 
     final labelType =
         switch (settingsState.settings.navigationRailLabelVisibility) {
-      messages.NavigationRailLabelVisibility.all => NavigationRailLabelType.all,
+      messages.NavigationRailLabelVisibility.all =>
+        NavigationRailLabelType.all,
       messages.NavigationRailLabelVisibility.selected =>
         NavigationRailLabelType.selected,
     };
+
     return Scaffold(
-        body: Row(
-      children: [
-        SafeArea(
+      body: Row(
+        children: [
+          SafeArea(
             child: NavigationRail(
-          backgroundColor: Theme.of(context).colorScheme.surfaceContainerLow,
-          labelType: labelType,
-          destinations: destinations,
-          selectedIndex: pageIndex,
-          onDestinationSelected: (index) => setState(
-            () => _currentPageKey = pageDefinitions[index].key,
+              backgroundColor:
+                  Theme.of(context).colorScheme.surfaceContainerLow,
+              labelType: labelType,
+              destinations: destinations,
+              selectedIndex: pageIndex,
+              onDestinationSelected: (index) => setState(
+                () => _currentPageKey = pageDefinitions[index].key,
+              ),
+            ),
           ),
-        )),
-        Expanded(
-          child: Column(
-            children: [
-              if (appState.coreVersionInfo?.releaseChannel == 'development' &&
-                  _currentPageKey != 'about')
-                const AppUpdateBanner(),
-              Expanded(
-                child: AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 100),
-                  child: SizedBox.expand(
-                    key: ValueKey(_currentPageKey),
-                    child: pageDefinitions[pageIndex].buildContent(),
+          Expanded(
+            child: Column(
+              children: [
+                if (appState.coreVersionInfo?.releaseChannel ==
+                        'development' &&
+                    _currentPageKey != 'about')
+                  const AppUpdateBanner(),
+                Expanded(
+                  child: AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 100),
+                    child: SizedBox.expand(
+                      key: ValueKey(_currentPageKey),
+                      child: pageDefinitions[pageIndex].buildContent(),
+                    ),
                   ),
                 ),
-              ),
-              const StatusBar(),
-            ],
+                const StatusBar(),
+              ],
+            ),
           ),
-        ),
-      ],
-    ));
+        ],
+      ),
+    );
   }
 
   int? _pageIndexForKey(
@@ -411,6 +459,7 @@ class _SinglePageState extends State<SinglePage> {
         return i;
       }
     }
+
     return null;
   }
 }
