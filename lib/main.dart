@@ -1,10 +1,9 @@
-
 import 'dart:async';
 import 'dart:ui';
 
 import 'package:desktop_window/desktop_window.dart';
-import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:dynamic_color/dynamic_color.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:system_date_time_format/system_date_time_format.dart';
@@ -43,12 +42,11 @@ void main() async {
       platform == TargetPlatform.macOS ||
       platform == TargetPlatform.linux;
 
-  // macOS-specific FilePicker initialization.
+  // Desktop-only initialization.
   if (platform == TargetPlatform.macOS) {
     await FilePicker.skipEntitlementsChecks();
   }
 
-  // Desktop-only window initialization.
   if (isDesktop) {
     await DesktopWindow.setMinWindowSize(const Size(800, 650));
 
@@ -59,6 +57,8 @@ void main() async {
     );
   }
 
+  // Build the Flutter UI first.
+  // Rust initialization must not happen before runApp().
   runApp(
     MultiProvider(
       providers: [
@@ -73,28 +73,43 @@ void main() async {
         ChangeNotifierProvider(create: (_) => TaskState()),
         ChangeNotifierProvider(
           lazy: false,
-          create: (_) => SettingsState()..load(),
+          create: (_) => SettingsState(),
         ),
         ChangeNotifierProvider(
           lazy: false,
-          create: (context) =>
-              AppUpdateState(settings: context.read<SettingsState>()),
+          create: (context) => AppUpdateState(
+            settings: context.read<SettingsState>(),
+          ),
         ),
         ChangeNotifierProvider(create: (_) => LogState()),
       ],
-      child: const SDTFScope(child: YAASApp()),
+      child: const SDTFScope(
+        child: YAASApp(),
+      ),
     ),
   );
 
+  // Initialize Rust after the first Flutter UI has been created.
   await initializeRust(messages.assignRustSignal);
+
+  // Load settings only after Rinf is ready.
+  final settingsState =
+      YAASApp.navigatorKey.currentContext?.read<SettingsState>();
+
+  settingsState?.load();
 
   messages.Toast.rustSignalStream.listen((message) {
     final toast = message.message;
+
     toastification.show(
-      type: toast.error ? ToastificationType.error : ToastificationType.success,
+      type: toast.error
+          ? ToastificationType.error
+          : ToastificationType.success,
       title: ToastText(toast.title),
       description: ToastText(toast.description),
-      autoCloseDuration: Duration(milliseconds: toast.duration ?? 3000),
+      autoCloseDuration: Duration(
+        milliseconds: toast.duration ?? 3000,
+      ),
       style: ToastificationStyle.flat,
       backgroundColor: null,
       borderSide: BorderSide.none,
@@ -103,7 +118,9 @@ void main() async {
   });
 
   messages.RustPanic.rustSignalStream.listen((panic) {
-    final appState = YAASApp.navigatorKey.currentContext?.read<AppState>();
+    final appState =
+        YAASApp.navigatorKey.currentContext?.read<AppState>();
+
     if (appState != null) {
       appState.setPanicMessage(panic.message.message);
     }
@@ -111,7 +128,10 @@ void main() async {
 
   messages.AppVersionInfo.rustSignalStream.listen((pack) {
     final info = pack.message;
-    final appState = YAASApp.navigatorKey.currentContext?.read<AppState>();
+
+    final appState =
+        YAASApp.navigatorKey.currentContext?.read<AppState>();
+
     appState?.setCoreVersionInfo(info);
   });
 }
@@ -129,6 +149,7 @@ class _YAASAppState extends State<YAASApp> {
   static const _shutdownWatchdog = Duration(seconds: 12);
 
   late final AppLifecycleListener _listener;
+
   Color? _linuxKdeAccent;
   bool _triedReadLinuxAccent = false;
   bool _exitRequestInProgress = false;
@@ -136,6 +157,7 @@ class _YAASAppState extends State<YAASApp> {
   @override
   void initState() {
     super.initState();
+
     _listener = AppLifecycleListener(
       onExitRequested: _handleExitRequested,
     );
@@ -154,7 +176,8 @@ class _YAASAppState extends State<YAASApp> {
     return ToastificationWrapper(
       config: ToastificationConfig(
         marginBuilder: (context, alignment) {
-          final y = alignment.resolve(Directionality.of(context)).y;
+          final y =
+              alignment.resolve(Directionality.of(context)).y;
 
           return switch (y) {
             <= -0.5 => const EdgeInsets.only(top: 12),
@@ -164,44 +187,61 @@ class _YAASAppState extends State<YAASApp> {
         },
       ),
       child: DynamicColorBuilder(
-        builder: (ColorScheme? lightDynamic, ColorScheme? darkDynamic) {
-          final settings = context.watch<SettingsState>().settings;
-          final seed = app_theme.seedFromKey(settings.seedColorKey);
+        builder: (
+          ColorScheme? lightDynamic,
+          ColorScheme? darkDynamic,
+        ) {
+          final settings =
+              context.watch<SettingsState>().settings;
+
+          final seed =
+              app_theme.seedFromKey(settings.seedColorKey);
 
           final ColorScheme lightScheme;
           final ColorScheme darkScheme;
 
           if (settings.useSystemColor) {
-            final fallbackSeed = _linuxKdeAccent ?? seed;
-            lightScheme = lightDynamic ??
+            final fallbackSeed =
+                _linuxKdeAccent ?? seed;
+
+            lightScheme =
+                lightDynamic ??
                 ColorScheme.fromSeed(
                   seedColor: fallbackSeed,
                   brightness: Brightness.light,
                 );
-            darkScheme = darkDynamic ??
+
+            darkScheme =
+                darkDynamic ??
                 ColorScheme.fromSeed(
                   seedColor: fallbackSeed,
                   brightness: Brightness.dark,
                 );
           } else {
-            lightScheme = ColorScheme.fromSeed(
-              seedColor: seed,
-              brightness: Brightness.light,
-            );
-            darkScheme = ColorScheme.fromSeed(
-              seedColor: seed,
-              brightness: Brightness.dark,
-            );
+            lightScheme =
+                ColorScheme.fromSeed(
+                  seedColor: seed,
+                  brightness: Brightness.light,
+                );
+
+            darkScheme =
+                ColorScheme.fromSeed(
+                  seedColor: seed,
+                  brightness: Brightness.dark,
+                );
           }
 
           ThemeMode themeMode;
+
           switch (settings.themePreference) {
             case messages.ThemePreference.auto:
               themeMode = ThemeMode.system;
               break;
+
             case messages.ThemePreference.light:
               themeMode = ThemeMode.light;
               break;
+
             case messages.ThemePreference.dark:
               themeMode = ThemeMode.dark;
               break;
@@ -209,24 +249,37 @@ class _YAASAppState extends State<YAASApp> {
 
           return MaterialApp(
             navigatorKey: YAASApp.navigatorKey,
+
             onGenerateTitle: (context) =>
                 AppLocalizations.of(context).appTitle,
+
             locale: context.watch<SettingsState>().locale,
+
             localizationsDelegates: const [
               AppLocalizations.delegate,
               GlobalMaterialLocalizations.delegate,
               GlobalWidgetsLocalizations.delegate,
               GlobalCupertinoLocalizations.delegate,
             ],
-            supportedLocales: AppLocalizations.supportedLocales,
+
+            supportedLocales:
+                AppLocalizations.supportedLocales,
+
             themeMode: themeMode,
+
             theme: app_theme.buildAppTheme(lightScheme),
-            darkTheme: app_theme.buildAppTheme(darkScheme),
+
+            darkTheme:
+                app_theme.buildAppTheme(darkScheme),
+
             home: Consumer<AppState>(
               builder: (context, appState, child) {
                 if (appState.panicMessage != null) {
-                  return ErrorScreen(message: appState.panicMessage!);
+                  return ErrorScreen(
+                    message: appState.panicMessage!,
+                  );
                 }
+
                 return DragDropOverlay(
                   child: const SinglePage(),
                 );
@@ -240,13 +293,18 @@ class _YAASAppState extends State<YAASApp> {
 
   Future<void> _maybeLoadLinuxAccent() async {
     if (_triedReadLinuxAccent) return;
+
     _triedReadLinuxAccent = true;
 
-    final color = await app_theme.readKdeAccent();
+    final color =
+        await app_theme.readKdeAccent();
+
     if (!mounted) return;
 
     if (color != null) {
-      setState(() => _linuxKdeAccent = color);
+      setState(() {
+        _linuxKdeAccent = color;
+      });
     }
   }
 
@@ -256,22 +314,27 @@ class _YAASAppState extends State<YAASApp> {
     }
 
     _exitRequestInProgress = true;
+
     var shouldExit = false;
 
     try {
-      final activeTaskCount = context.read<TaskState>().activeTasks.length;
+      final activeTaskCount =
+          context.read<TaskState>().activeTasks.length;
 
       if (activeTaskCount > 0) {
-        final dialogContext = YAASApp.navigatorKey.currentContext;
+        final dialogContext =
+            YAASApp.navigatorKey.currentContext;
 
         if (dialogContext == null) {
           debugPrint(
             '[Shutdown] Navigator is not ready to confirm application exit',
           );
+
           return AppExitResponse.cancel;
         }
 
-        shouldExit = await showActiveTasksCloseDialog(
+        shouldExit =
+            await showActiveTasksCloseDialog(
           context: dialogContext,
           activeTaskCount: activeTaskCount,
           prepareShutdown: _prepareRustShutdown,
@@ -286,6 +349,7 @@ class _YAASAppState extends State<YAASApp> {
       }
 
       finalizeRust();
+
       return AppExitResponse.exit;
     } finally {
       if (!shouldExit) {
@@ -295,12 +359,13 @@ class _YAASAppState extends State<YAASApp> {
   }
 
   Future<void> _prepareRustShutdown() async {
-    final ready = messages.AppShutdownReady.rustSignalStream.first.timeout(
-      _shutdownWatchdog,
-    );
+    final ready =
+        messages.AppShutdownReady.rustSignalStream.first
+            .timeout(_shutdownWatchdog);
 
     messages.AppShutdownRequest(
-      installUpdate: context.read<AppUpdateState>().installOnExit,
+      installUpdate:
+          context.read<AppUpdateState>().installOnExit,
     ).sendSignalToRust();
 
     try {
@@ -308,13 +373,19 @@ class _YAASAppState extends State<YAASApp> {
 
       if (result.timedOut) {
         debugPrint(
-          '[Shutdown] Timed out with ${result.remainingTasks} tasks remaining',
+          '[Shutdown] Timed out with '
+          '${result.remainingTasks} tasks remaining',
         );
       }
     } on TimeoutException {
-      debugPrint('[Shutdown] Rust shutdown handshake timed out');
+      debugPrint(
+        '[Shutdown] Rust shutdown handshake timed out',
+      );
     } catch (error, stackTrace) {
-      debugPrint('[Shutdown] Rust shutdown handshake failed: $error');
+      debugPrint(
+        '[Shutdown] Rust shutdown handshake failed: $error',
+      );
+
       debugPrintStack(stackTrace: stackTrace);
     }
   }
@@ -333,38 +404,61 @@ class _SinglePageState extends State<SinglePage> {
 
   @override
   Widget build(BuildContext context) {
-    final l10n = AppLocalizations.of(context);
-    final appState = context.watch<AppState>();
-    final settingsState = context.watch<SettingsState>();
-    final allPages = AppPageRegistry.pages;
+    final l10n =
+        AppLocalizations.of(context);
 
-    final showDownloaderPages = settingsState.isDownloaderAvailable ||
+    final appState =
+        context.watch<AppState>();
+
+    final settingsState =
+        context.watch<SettingsState>();
+
+    final allPages =
+        AppPageRegistry.pages;
+
+    final showDownloaderPages =
+        settingsState.isDownloaderAvailable ||
         settingsState.isDownloaderInitializing ||
         settingsState.downloaderError != null;
 
-    final showDonationPages = settingsState.isDownloaderAvailable &&
+    final showDonationPages =
+        settingsState.isDownloaderAvailable &&
         settingsState.isDownloaderDonationConfigured;
 
-    List<AppPageDefinition> pageDefinitions = allPages;
+    List<AppPageDefinition> pageDefinitions =
+        allPages;
 
     if (!showDownloaderPages) {
       pageDefinitions =
-          pageDefinitions.where((p) => p.key != 'downloads').toList();
+          pageDefinitions
+              .where((p) => p.key != 'downloads')
+              .toList();
     }
 
     if (!showDonationPages) {
       pageDefinitions =
-          pageDefinitions.where((p) => p.key != 'donate').toList();
+          pageDefinitions
+              .where((p) => p.key != 'donate')
+              .toList();
     }
 
-    final destinations = pageDefinitions
-        .map((page) => page.toNavigationDestination(l10n))
-        .toList();
+    final destinations =
+        pageDefinitions
+            .map(
+              (page) =>
+                  page.toNavigationDestination(l10n),
+            )
+            .toList();
 
-    if (!_startupApplied && settingsState.hasLoaded) {
-      final startupKey = settingsState.settings.startupPageKey;
+    if (!_startupApplied &&
+        settingsState.hasLoaded) {
+      final startupKey =
+          settingsState.settings.startupPageKey;
+
       final hasStartupPage =
-          pageDefinitions.any((page) => page.key == startupKey);
+          pageDefinitions.any(
+            (page) => page.key == startupKey,
+          );
 
       if (hasStartupPage) {
         _currentPageKey = startupKey;
@@ -373,81 +467,211 @@ class _SinglePageState extends State<SinglePage> {
       _startupApplied = true;
     }
 
-    final requestedPageKey = appState.takeNavigationRequest();
+    final requestedPageKey =
+        appState.takeNavigationRequest();
 
     if (requestedPageKey != null) {
       final hasRequestedPage =
-          pageDefinitions.any((page) => page.key == requestedPageKey);
+          pageDefinitions.any(
+            (page) =>
+                page.key == requestedPageKey,
+          );
 
       if (hasRequestedPage) {
-        _currentPageKey = requestedPageKey;
+        _currentPageKey =
+            requestedPageKey;
       } else {
         debugPrint(
-          'ERROR: Requested page key "$requestedPageKey" not found',
+          'ERROR: Requested page key '
+          '"$requestedPageKey" not found',
         );
       }
     }
 
     if (_currentPageKey == null ||
-        !pageDefinitions.any((page) => page.key == _currentPageKey)) {
+        !pageDefinitions.any(
+          (page) =>
+              page.key == _currentPageKey,
+        )) {
       if (pageDefinitions.isNotEmpty) {
-        final homePage = pageDefinitions.firstWhere(
+        final homePage =
+            pageDefinitions.firstWhere(
           (page) => page.key == 'home',
-          orElse: () => pageDefinitions.first,
+          orElse: () =>
+              pageDefinitions.first,
         );
 
-        _currentPageKey = homePage.key;
+        _currentPageKey =
+            homePage.key;
       }
     }
 
     final pageIndex =
-        _pageIndexForKey(_currentPageKey!, pageDefinitions) ?? 0;
+        _pageIndexForKey(
+              _currentPageKey!,
+              pageDefinitions,
+            ) ??
+            0;
 
     final labelType =
-        switch (settingsState.settings.navigationRailLabelVisibility) {
+        switch (
+            settingsState
+                .settings
+                .navigationRailLabelVisibility) {
       messages.NavigationRailLabelVisibility.all =>
         NavigationRailLabelType.all,
+
       messages.NavigationRailLabelVisibility.selected =>
         NavigationRailLabelType.selected,
     };
 
+    final isCompact =
+        MediaQuery.sizeOf(context).width < 600;
+
     return Scaffold(
       body: Row(
         children: [
-          SafeArea(
-            child: NavigationRail(
-              backgroundColor:
-                  Theme.of(context).colorScheme.surfaceContainerLow,
-              labelType: labelType,
-              destinations: destinations,
-              selectedIndex: pageIndex,
-              onDestinationSelected: (index) => setState(
-                () => _currentPageKey = pageDefinitions[index].key,
+          if (!isCompact)
+            SafeArea(
+              child: NavigationRail(
+                minWidth: 72,
+                backgroundColor:
+                    Theme.of(context)
+                        .colorScheme
+                        .surfaceContainerLow,
+                labelType: labelType,
+                destinations: destinations,
+                selectedIndex: pageIndex,
+                onDestinationSelected:
+                    (index) => setState(
+                  () =>
+                      _currentPageKey =
+                          pageDefinitions[index].key,
+                ),
               ),
             ),
-          ),
+
           Expanded(
             child: Column(
               children: [
-                if (appState.coreVersionInfo?.releaseChannel ==
+                if (appState
+                            .coreVersionInfo
+                            ?.releaseChannel ==
                         'development' &&
                     _currentPageKey != 'about')
                   const AppUpdateBanner(),
+
                 Expanded(
                   child: AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 100),
+                    duration:
+                        const Duration(
+                      milliseconds: 100,
+                    ),
                     child: SizedBox.expand(
-                      key: ValueKey(_currentPageKey),
-                      child: pageDefinitions[pageIndex].buildContent(),
+                      key: ValueKey(
+                        _currentPageKey,
+                      ),
+                      child:
+                          pageDefinitions[
+                                  pageIndex]
+                              .buildContent(),
                     ),
                   ),
                 ),
+
                 const StatusBar(),
               ],
             ),
           ),
         ],
       ),
+
+      bottomNavigationBar:
+          isCompact
+              ? SafeArea(
+                  top: false,
+                  child: SizedBox(
+                    height: 64,
+                    child: Material(
+                      color: Theme.of(context)
+                          .colorScheme
+                          .surfaceContainerLow,
+
+                      child: ListView.builder(
+                        scrollDirection:
+                            Axis.horizontal,
+
+                        itemCount:
+                            destinations.length,
+
+                        itemBuilder:
+                            (context, index) {
+                          final selected =
+                              index == pageIndex;
+
+                          return InkWell(
+                            onTap: () =>
+                                setState(
+                              () =>
+                                  _currentPageKey =
+                                      pageDefinitions[
+                                              index]
+                                          .key,
+                            ),
+
+                            child: SizedBox(
+                              width: 76,
+
+                              child: Column(
+                                mainAxisAlignment:
+                                    MainAxisAlignment
+                                        .center,
+
+                                children: [
+                                  Icon(
+                                    selected
+                                        ? destinations[
+                                                index]
+                                            .selectedIcon
+                                            .icon
+                                        : destinations[
+                                                index]
+                                            .icon
+                                            .icon,
+                                    size: 22,
+                                  ),
+
+                                  const SizedBox(
+                                    height: 2,
+                                  ),
+
+                                  Text(
+                                    pageDefinitions[
+                                            index]
+                                        .label(l10n),
+
+                                    maxLines: 1,
+
+                                    overflow:
+                                        TextOverflow
+                                            .ellipsis,
+
+                                    style: Theme.of(
+                                      context,
+                                    )
+                                        .textTheme
+                                        .labelSmall,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ),
+                )
+              : null,
     );
   }
 
@@ -455,7 +679,9 @@ class _SinglePageState extends State<SinglePage> {
     String pageKey,
     List<AppPageDefinition> definitions,
   ) {
-    for (var i = 0; i < definitions.length; i++) {
+    for (var i = 0;
+        i < definitions.length;
+        i++) {
       if (definitions[i].key == pageKey) {
         return i;
       }
