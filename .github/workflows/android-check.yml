@@ -54,7 +54,7 @@ jobs:
       - name: Build APK
         run: flutter build apk --debug
 
-         - name: Verify APK
+      - name: Verify APK
         run: |
           APK=build/app/outputs/flutter-apk/app-debug.apk
           test -s "$APK"
@@ -68,4 +68,4 @@ jobs:
           name: yaas-android-debug-apk
           path: build/app/outputs/flutter-apk/app-debug.apk
           if-no-files-found: error
-          retention-days: 7   
+          retention-days: 7
