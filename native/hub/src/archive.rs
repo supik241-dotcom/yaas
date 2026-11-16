@@ -1,3 +1,4 @@
+
 use std::{
     ffi::{OsStr, OsString},
     io,
@@ -24,6 +25,8 @@ fn resolve_7z_path() -> Result<PathBuf> {
     const CANDIDATES: &[&str] = &["7zzs", "7zz", "7za", "7z"];
     #[cfg(target_os = "macos")]
     const CANDIDATES: &[&str] = &["7zz", "7za", "7z"];
+    #[cfg(target_os = "android")]
+    const CANDIDATES: &[&str] = &["7zz", "7z"];
 
     for name in CANDIDATES {
         if let Ok(path) = resolve_binary_path(None, name) {
@@ -466,7 +469,6 @@ Modified = 2025-09-24 20:33:23
 Created = 
 Accessed = 
 Attributes =  -rw-r--r--
-Encrypted = -
 Comment = 
 CRC = 900333F3
 Method = Deflate:Maximum
@@ -484,28 +486,22 @@ Modified = 2025-09-24 20:54:58
 Created = 
 Accessed = 
 Attributes =  -rwxr-x-x
-Encrypted = -
 Comment = 
 CRC = 7A97B213
 Method = Deflate:Maximum
 Characteristics = UT:MA:1 ux
-Host OS = Unix
 Version = 20
 Volume Index = 0
 Offset = 2174509
 "#;
 
         let files = parse_7z_slt_listing(sample);
-        // Directory should not be present
         assert!(!files.iter().any(|p| p == "rclone-v1.71.1-linux-amd64"));
-
-        // Expected files should be present
         assert!(files.iter().any(|p| p.ends_with("/rclone")));
         assert!(files.iter().any(|p| p.ends_with("/rclone.1")));
         assert!(files.iter().any(|p| p.ends_with("/README.txt")));
         assert!(files.iter().any(|p| p.ends_with("/README.html")));
         assert!(files.iter().any(|p| p.ends_with("/git-log.txt")));
-
         assert_eq!(files.len(), 5);
     }
 
@@ -531,7 +527,7 @@ Packed Size = 0
 Modified = 2023-03-16 14:59:03
 Created =
 Accessed =
-Attributes = D
+Attributes = A
 Encrypted = -
 Comment =
 CRC =
@@ -634,16 +630,12 @@ Offset = 17198364
 "#;
 
         let files = parse_7z_slt_listing(sample);
-        // Directory should not be present
         assert!(!files.iter().any(|p| p == "rclone-v1.62.2-windows-amd64"));
-
-        // Expected files should be present
         assert!(files.iter().any(|p| p.ends_with("/rclone.exe")));
         assert!(files.iter().any(|p| p.ends_with("/rclone.1")));
         assert!(files.iter().any(|p| p.ends_with("/README.txt")));
         assert!(files.iter().any(|p| p.ends_with("/README.html")));
         assert!(files.iter().any(|p| p.ends_with("/git-log.txt")));
-
         assert_eq!(files.len(), 5);
     }
 
@@ -734,8 +726,12 @@ Offset = 17198364
         std::fs::remove_dir_all(&payload_dir).unwrap();
         assert!(!payload_dir.exists());
 
-        let archives = list_7z_in_dir(root_path).await.expect("listing 7z archives should succeed");
+        let archives = list_7z_in_dir(root_path)
+            .await
+            .expect("listing 7z archives should succeed");
+
         assert_eq!(archives, vec![archive_path]);
+
         for archive in &archives {
             decompress_archive(archive, root_path, None, None, None)
                 .await
@@ -743,8 +739,10 @@ Offset = 17198364
         }
 
         assert!(payload_dir.is_dir());
+
         let extracted_inner = payload_dir.join("inner.txt");
         assert!(extracted_inner.is_file());
+
         let content = std::fs::read_to_string(extracted_inner).unwrap();
         assert_eq!(content, "CONTENT");
     }
