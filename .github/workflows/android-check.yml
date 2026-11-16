@@ -1,64 +1,75 @@
-
 name: Android APK Check
 
 on:
-  workflow_dispatch:
-  push:
-    branches:
-      - android-port
+workflow_dispatch:
+push:
+branches:
+- android-port
 
 permissions:
-  contents: read
+contents: read
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+build:
+runs-on: ubuntu-latest
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
+steps:
+  - name: Checkout
+    uses: actions/checkout@v4
+    with:
+      submodules: recursive
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
+  - name: Setup Java
+    uses: actions/setup-java@v4
+    with:
+      distribution: temurin
+      java-version: '17'
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+  - name: Setup Rust
+    uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Rinf CLI
-        run: cargo install rinf_cli --locked
+  - name: Install Rinf CLI
+    run: cargo install rinf_cli --locked
 
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          cache: true
+  - name: Setup Flutter
+    uses: subosito/flutter-action@v2
+    with:
+      channel: stable
+      cache: true
 
-      - name: Generate Android project
-        run: flutter create --platforms=android --org com.yaas .
+  - name: Generate Android project
+    run: flutter create --platforms=android --org com.yaas .
 
-      - name: Get dependencies
-        run: flutter pub get
+  - name: Get dependencies
+    run: flutter pub get
 
-      - name: Generate Rinf bindings
-        run: rinf gen
+  - name: Generate Rinf bindings
+    run: rinf gen
 
-      - name: Check generated files
-        run: |
-          test -f lib/src/bindings/bindings.dart
-          test -f lib/src/bindings/signals/signals.dart
+  - name: Check generated files
+    run: |
+      test -f lib/src/bindings/bindings.dart
+      test -f lib/src/bindings/signals/signals.dart
 
-      - name: Build APK
-        run: flutter build apk --debug
+  - name: Build APK
+    run: flutter build apk --debug
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: yaas-android-debug
-          path: build/app/outputs/flutter-apk/app-debug.apk
-          if-no-files-found: error
-          retention-days: 7
+  - name: Check APK
+    run: |
+      test -f build/app/outputs/flutter-apk/app-debug.apk
+      ls -lh build/app/outputs/flutter-apk/app-debug.apk
+      sha256sum build/app/outputs/flutter-apk/app-debug.apk
+
+  - name: Create ZIP
+    run: |
+      cd build/app/outputs/flutter-apk
+      zip -9 yaas-android-debug.zip app-debug.apk
+      unzip -t yaas-android-debug.zip
+
+  - name: Upload APK ZIP
+    uses: actions/upload-artifact@v4
+    with:
+      name: yaas-android-debug
+      path: build/app/outputs/flutter-apk/yaas-android-debug.zip
+      if-no-files-found: error
+      retention-days: 7
