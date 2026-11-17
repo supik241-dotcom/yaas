@@ -51,12 +51,12 @@ jobs:
           test -f lib/src/bindings/bindings.dart
           test -f lib/src/bindings/signals/signals.dart
 
-      - name: Build APK
-        run: flutter build apk --debug
+      - name: Build ARM64 APK
+        run: flutter build apk --debug --split-per-abi
 
-      - name: Verify APK
+      - name: Verify ARM64 APK
         run: |
-          APK=build/app/outputs/flutter-apk/app-debug.apk
+          APK=build/app/outputs/flutter-apk/app-arm64-v8a-debug.apk
 
           test -s "$APK"
 
@@ -67,21 +67,22 @@ jobs:
           echo "APK SHA256:"
           sha256sum "$APK"
 
-          echo "APK ZIP integrity:"
+          echo "APK integrity:"
           unzip -t "$APK"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: android-build-${{ github.run_number }}
-          name: YAAS Android Build ${{ github.run_number }}
+          tag_name: android-arm64-${{ github.run_number }}
+          name: YAAS Android ARM64 Build ${{ github.run_number }}
           body: |
-            YAAS Android debug build.
+            YAAS Android ARM64 debug build.
 
             Commit:
             ${{ github.sha }}
 
-            This APK was built automatically by GitHub Actions.
-          files: build/app/outputs/flutter-apk/app-debug.apk
+            Target architecture:
+            arm64-v8a
+          files: build/app/outputs/flutter-apk/app-arm64-v8a-debug.apk
           prerelease: true
           make_latest: false
