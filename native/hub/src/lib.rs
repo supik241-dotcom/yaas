@@ -103,55 +103,82 @@ fn main() {
     let _ = catch_unwind(|| {
         runtime.block_on(async move {
             let init_start = Instant::now();
+
             // Initialize everything
             let (task_manager, native_casting, adb_service, updater) =
                 timeout(Duration::from_secs(10), init(portable_mode))
                     .await
                     .expect("Core initialization timed out");
+
             info!("Core initialization completed in {:?}", init_start.elapsed());
 
-            let shutdown_request_receiver = AppShutdownRequest::get_dart_signal_receiver();
+            let shutdown_request_receiver =
+                AppShutdownRequest::get_dart_signal_receiver();
+
             enum ShutdownSource {
                 Dart,
+
                 /// Whether to install the ready application update.
                 Request(bool),
+
                 Panic,
             }
 
             let source = tokio::select! {
                 _ = rinf::dart_shutdown() => ShutdownSource::Dart,
+
                 request = shutdown_request_receiver.recv() => {
                     if let Some(request) = request {
-                        ShutdownSource::Request(request.message.install_update)
+                        ShutdownSource::Request(
+                            request.message.install_update
+                        )
                     } else {
                         ShutdownSource::Dart
                     }
                 },
+
                 _ = panic_notify.notified() => ShutdownSource::Panic,
             };
 
             match source {
                 ShutdownSource::Panic => {}
+
                 ShutdownSource::Dart => {
                     tokio::select! {
-                        _ = prepare_shutdown(&task_manager, &native_casting) => {},
+                        _ = prepare_shutdown(
+                            &task_manager,
+                            &native_casting
+                        ) => {},
+
                         _ = panic_notify.notified() => {},
                     }
                 }
+
                 ShutdownSource::Request(install_update) => {
                     let shutdown_result = tokio::select! {
-                        result = prepare_shutdown(&task_manager, &native_casting) => Some(result),
+                        result = prepare_shutdown(
+                            &task_manager,
+                            &native_casting
+                        ) => Some(result),
+
                         _ = panic_notify.notified() => None,
                     };
+
                     if let Some(shutdown_result) = shutdown_result {
                         if install_update {
-                            launch_update(&updater, &adb_service).await;
+                            launch_update(
+                                &updater,
+                                &adb_service
+                            ).await;
                         }
+
                         AppShutdownReady {
                             timed_out: shutdown_result.timed_out,
-                            remaining_tasks: shutdown_result.remaining_tasks as u32,
+                            remaining_tasks:
+                                shutdown_result.remaining_tasks as u32,
                         }
                         .send_signal_to_dart();
+
                         tokio::select! {
                             _ = rinf::dart_shutdown() => {},
                             _ = panic_notify.notified() => {},
@@ -166,17 +193,25 @@ fn main() {
 }
 
 /// Starts installing the ready update, if any; the app exits right after.
-async fn launch_update(updater: &update::UpdateManager, adb_service: &AdbService) {
+async fn launch_update(
+    updater: &update::UpdateManager,
+    adb_service: &AdbService,
+) {
     let Some(ready) = updater.ready() else {
         error!("No update is ready to install");
         return;
     };
+
     if cfg!(windows) {
         // A running bundled ADB server would lock files in the install directory.
         adb_service.stop_bundled_server().await;
     }
+
     if let Err(error) = ready.launch() {
-        error!(error = format!("{error:#}"), "Cannot start update installation");
+        error!(
+            error = format!("{error:#}"),
+            "Cannot start update installation"
+        );
     }
 }
 
@@ -185,20 +220,30 @@ async fn prepare_shutdown(
     native_casting: &NativeCastingManager,
 ) -> task::TaskShutdownResult {
     let (casting, mut result) = tokio::join!(
-        timeout(TASK_SHUTDOWN_TIMEOUT, native_casting.shutdown()),
+        timeout(
+            TASK_SHUTDOWN_TIMEOUT,
+            native_casting.shutdown()
+        ),
         task_manager.shutdown(TASK_SHUTDOWN_TIMEOUT),
     );
+
     if casting.is_err() {
         error!("Casting shutdown timed out");
         result.timed_out = true;
     }
+
     result
 }
 
 #[instrument]
 async fn init(
     portable_mode: bool,
-) -> (Arc<TaskManager>, Arc<NativeCastingManager>, Arc<AdbService>, Arc<update::UpdateManager>) {
+) -> (
+    Arc<TaskManager>,
+    Arc<NativeCastingManager>,
+    Arc<AdbService>,
+    Arc<update::UpdateManager>,
+) {
     let app_dir = resolve_app_dir(portable_mode);
     init_in_dir(app_dir, portable_mode).await
 }
@@ -206,14 +251,24 @@ async fn init(
 async fn init_in_dir(
     app_dir: PathBuf,
     portable_mode: bool,
-) -> (Arc<TaskManager>, Arc<NativeCastingManager>, Arc<AdbService>, Arc<update::UpdateManager>) {
+) -> (
+    Arc<TaskManager>,
+    Arc<NativeCastingManager>,
+    Arc<AdbService>,
+    Arc<update::UpdateManager>,
+) {
     if !app_dir.exists() {
-        std::fs::create_dir_all(&app_dir).expect("Failed to create app directory");
+        std::fs::create_dir_all(&app_dir)
+            .expect("Failed to create app directory");
     }
 
     if let Err(e) = setup_logging(&app_dir) {
-        rinf::debug_print!("Failed to setup logging: {:#}", e);
+        rinf::debug_print!(
+            "Failed to setup logging: {:#}",
+            e
+        );
     }
+
     // Log and send version/build info
     info!(
         app_version = env!("YAAS_APP_VERSION"),
@@ -223,164 +278,370 @@ async fn init_in_dir(
         run_attempt = env!("YAAS_RUN_ATTEMPT"),
         "Application build"
     );
+
     info!(
         "Starting YAAS core {}| version={} | commit={}{} | profile={} | rustc={} | built={}",
-        if portable_mode { "(portable mode)" } else { "" },
+        if portable_mode {
+            "(portable mode)"
+        } else {
+            ""
+        },
         built_info::PKG_VERSION,
-        built_info::GIT_COMMIT_HASH_SHORT.unwrap_or("unknown"),
-        if built_info::GIT_DIRTY.unwrap_or(false) { " (dirty)" } else { "" },
+        built_info::GIT_COMMIT_HASH_SHORT
+            .unwrap_or("unknown"),
+        if built_info::GIT_DIRTY.unwrap_or(false) {
+            " (dirty)"
+        } else {
+            ""
+        },
         built_info::PROFILE,
         built_info::RUSTC_VERSION,
         built_info::BUILT_TIME_UTC
     );
+
     AppVersionInfo {
-        app_version: env!("YAAS_APP_VERSION").to_string(),
-        build_number: env!("YAAS_BUILD_NUMBER").to_string(),
-        release_channel: env!("YAAS_RELEASE_CHANNEL").to_string(),
-        run_number: (!env!("YAAS_RUN_NUMBER").is_empty())
-            .then(|| env!("YAAS_RUN_NUMBER").to_string()),
-        run_attempt: (!env!("YAAS_RUN_ATTEMPT").is_empty())
-            .then(|| env!("YAAS_RUN_ATTEMPT").to_string()),
-        core_version: built_info::PKG_VERSION.to_string(),
-        profile: built_info::PROFILE.to_string(),
-        rustc_version: built_info::RUSTC_VERSION.to_string(),
-        built_time_utc: built_info::BUILT_TIME_UTC.to_string(),
-        git_commit_hash: built_info::GIT_COMMIT_HASH.map(|s| s.to_string()),
-        git_commit_hash_short: built_info::GIT_COMMIT_HASH_SHORT.map(|s| s.to_string()),
-        git_dirty: built_info::GIT_DIRTY,
+        app_version:
+            env!("YAAS_APP_VERSION").to_string(),
+
+        build_number:
+            env!("YAAS_BUILD_NUMBER").to_string(),
+
+        release_channel:
+            env!("YAAS_RELEASE_CHANNEL").to_string(),
+
+        run_number:
+            (!env!("YAAS_RUN_NUMBER").is_empty())
+                .then(|| {
+                    env!("YAAS_RUN_NUMBER").to_string()
+                }),
+
+        run_attempt:
+            (!env!("YAAS_RUN_ATTEMPT").is_empty())
+                .then(|| {
+                    env!("YAAS_RUN_ATTEMPT").to_string()
+                }),
+
+        core_version:
+            built_info::PKG_VERSION.to_string(),
+
+        profile:
+            built_info::PROFILE.to_string(),
+
+        rustc_version:
+            built_info::RUSTC_VERSION.to_string(),
+
+        built_time_utc:
+            built_info::BUILT_TIME_UTC.to_string(),
+
+        git_commit_hash:
+            built_info::GIT_COMMIT_HASH
+                .map(|s| s.to_string()),
+
+        git_commit_hash_short:
+            built_info::GIT_COMMIT_HASH_SHORT
+                .map(|s| s.to_string()),
+
+        git_dirty:
+            built_info::GIT_DIRTY,
     }
     .send_signal_to_dart();
 
     debug!("Creating settings handler");
-    let settings_handler = SettingsHandler::new(app_dir.clone(), portable_mode)
-        .expect("Failed to create settings handler");
+
+    let settings_handler =
+        SettingsHandler::new(
+            app_dir.clone(),
+            portable_mode,
+        )
+        .expect(
+            "Failed to create settings handler"
+        );
 
     // Prepare media cache directory and send media configuration to Flutter
-    let media_cache_dir = app_dir.join("media_cache");
-    if let Err(e) = std::fs::create_dir_all(&media_cache_dir) {
-        rinf::debug_print!("Failed to create media cache directory: {:#}", e);
+    let media_cache_dir =
+        app_dir.join("media_cache");
+
+    if let Err(e) =
+        std::fs::create_dir_all(&media_cache_dir)
+    {
+        rinf::debug_print!(
+            "Failed to create media cache directory: {:#}",
+            e
+        );
     }
-    let media_base_url = "https://webdav.5698452.xyz/media/".to_string();
-    MediaConfigChanged { media_base_url, cache_dir: media_cache_dir.display().to_string() }
-        .send_signal_to_dart();
+
+    let media_base_url =
+        "https://webdav.5698452.xyz/media/"
+            .to_string();
+
+    MediaConfigChanged {
+        media_base_url,
+        cache_dir:
+            media_cache_dir
+                .display()
+                .to_string(),
+    }
+    .send_signal_to_dart();
 
     debug!("Creating adb service");
+
     let adb_service =
-        AdbService::new(WatchStream::new(settings_handler.subscribe()), app_dir.clone()).await;
+        AdbService::new(
+            WatchStream::new(
+                settings_handler.subscribe()
+            ),
+            app_dir.clone(),
+        )
+        .await;
+
     debug!("Creating downloads catalog");
-    let downloads_catalog = DownloadsCatalog::new(WatchStream::new(settings_handler.subscribe()));
+
+    let downloads_catalog =
+        DownloadsCatalog::new(
+            WatchStream::new(
+                settings_handler.subscribe()
+            )
+        );
+
     debug!("Creating downloader manager");
-    let downloader_manager = DownloaderManager::new();
+
+    let downloader_manager =
+        DownloaderManager::new();
+
     debug!("Creating task manager");
+
     let task_manager = TaskManager::new(
         adb_service.clone(),
         downloader_manager.clone(),
         downloads_catalog.clone(),
         settings_handler.clone(),
     );
+
     debug!("Starting downloader manager");
+
     DownloaderController::new(
         downloader_manager.clone(),
         app_dir.clone(),
         settings_handler.clone(),
     )
     .start();
+
     cloud_api::start_request_handlers();
 
     // Backups-related requests
     debug!("Creating backups catalog");
-    let _backups_handler = BackupsCatalog::start(WatchStream::new(settings_handler.subscribe()));
+
+    let _backups_handler =
+        BackupsCatalog::start(
+            WatchStream::new(
+                settings_handler.subscribe()
+            )
+        );
 
     // Casting-related requests (Windows-only)
     debug!("Creating casting manager");
-    CastingManager::start(app_dir.clone());
+
+    CastingManager::start(
+        app_dir.clone()
+    );
 
     // Native casting requests
-    debug!("Creating native casting manager");
-    let native_casting = NativeCastingManager::start(adb_service.clone());
+    let native_casting =
+        NativeCastingManager::start(
+            adb_service.clone()
+        );
 
     // Log-related requests from Flutter
     debug!("Starting signal layer request handler");
-    SignalLayer::start_request_handler(app_dir.join("logs"));
+
+    SignalLayer::start_request_handler(
+        app_dir.join("logs")
+    );
 
     let updater =
-        update::UpdateManager::start(app_dir, portable_mode, settings_handler.subscribe());
-    (task_manager, native_casting, adb_service, updater)
+        update::UpdateManager::start(
+            app_dir,
+            portable_mode,
+            settings_handler.subscribe(),
+        );
+
+    (
+        task_manager,
+        native_casting,
+        adb_service,
+        updater,
+    )
 }
 
-fn setup_logging(app_dir: &Path) -> Result<()> {
-    let mut logging = LOGGING.lock().unwrap();
+fn setup_logging(
+    app_dir: &Path,
+) -> Result<()> {
+    let mut logging =
+        LOGGING.lock().unwrap();
+
     // Flutter restart replaces the runtime but keeps the global subscriber alive.
     if let Some(logging) = logging.as_ref() {
-        SignalLayer::start_forwarder(logging.receiver.clone());
+        SignalLayer::start_forwarder(
+            logging.receiver.clone()
+        );
+
         return Ok(());
     }
 
-    let logs_dir = app_dir.join("logs");
-    let log_prefix = logs_dir.join("yaas_native");
+    let logs_dir =
+        app_dir.join("logs");
+
+    let log_prefix =
+        logs_dir.join("yaas_native");
 
     // Log to file
-    std::fs::create_dir_all(&logs_dir).context("Failed to create logs directory")?;
-    let file_appender = RollingFileAppender::builder()
-        .rotation(Rotation::DAILY)
-        .max_log_files(10)
-        .filename_prefix("yaas")
-        .filename_suffix("log")
-        .build(&log_prefix)
-        .context("Failed to initialize file appender")?;
-    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+    std::fs::create_dir_all(&logs_dir)
+        .context(
+            "Failed to create logs directory"
+        )?;
+
+    let file_appender =
+        RollingFileAppender::builder()
+            .rotation(
+                Rotation::DAILY
+            )
+            .max_log_files(10)
+            .filename_prefix("yaas")
+            .filename_suffix("log")
+            .build(&log_prefix)
+            .context(
+                "Failed to initialize file appender"
+            )?;
+
+    let (non_blocking, guard) =
+        tracing_appender::non_blocking(
+            file_appender
+        );
 
     // Real-time logging to Flutter
-    let (signal_layer, log_receiver) = SignalLayer::new();
+    let (signal_layer, log_receiver) =
+        SignalLayer::new();
 
-    let subscriber = tracing_subscriber::registry()
-        .with(signal_layer)
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_ansi(false)
-                .with_writer(non_blocking)
-                // .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
-                .event_format(fmt::format().pretty()),
-        )
-        .with(EnvFilter::new("trace,hyper_util=info"));
+    let subscriber =
+        tracing_subscriber::registry()
+            .with(signal_layer)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_writer(non_blocking)
+                    .event_format(
+                        fmt::format().pretty()
+                    ),
+            )
+            .with(
+                EnvFilter::new(
+                    "trace,hyper_util=info"
+                )
+            );
 
-    tracing::subscriber::set_global_default(subscriber)
-        .context("Failed to set global subscriber")?;
+    tracing::subscriber::set_global_default(
+        subscriber
+    )
+    .context(
+        "Failed to set global subscriber"
+    )?;
 
-    let receiver = Arc::new(tokio::sync::Mutex::new(log_receiver));
-    SignalLayer::start_forwarder(receiver.clone());
-    *logging = Some(Logging { _guard: guard, receiver });
+    let receiver =
+        Arc::new(
+            tokio::sync::Mutex::new(
+                log_receiver
+            )
+        );
+
+    SignalLayer::start_forwarder(
+        receiver.clone()
+    );
+
+    *logging =
+        Some(
+            Logging {
+                _guard: guard,
+                receiver,
+            }
+        );
+
     Ok(())
 }
 
 fn resolve_portable_app_dir() -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
     {
-        if let Ok(appimage) = std::env::var("APPIMAGE") {
-            let exe_path = PathBuf::from(appimage);
-            if let Some(dir) = exe_path.parent() {
-                return Some(dir.join("_portable_data"));
+        if let Ok(appimage) =
+            std::env::var("APPIMAGE")
+        {
+            let exe_path =
+                PathBuf::from(appimage);
+
+            if let Some(dir) =
+                exe_path.parent()
+            {
+                return Some(
+                    dir.join("_portable_data")
+                );
             }
         }
     }
 
-    let exe_path = std::env::current_exe().ok()?;
-    let dir = exe_path.parent()?;
-    Some(dir.join("_portable_data"))
+    let exe_path =
+        std::env::current_exe().ok()?;
+
+    let dir =
+        exe_path.parent()?;
+
+    Some(
+        dir.join("_portable_data")
+    )
 }
 
-fn resolve_app_dir(portable_mode: bool) -> PathBuf {
-    if portable_mode && cfg!(any(target_os = "windows", target_os = "linux")) {
-        if let Some(portable_dir) = resolve_portable_app_dir() {
+fn resolve_app_dir(
+    portable_mode: bool,
+) -> PathBuf {
+    if portable_mode
+        && cfg!(any(
+            target_os = "windows",
+            target_os = "linux"
+        ))
+    {
+        if let Some(portable_dir) =
+            resolve_portable_app_dir()
+        {
             return portable_dir;
         } else {
-            panic!("--portable requested but failed to resolve executable path");
+            panic!(
+                "--portable requested but failed to resolve executable path"
+            );
         }
     }
 
-    let data_dir = dirs::data_dir().expect("Failed to get data directory");
+    // Android does not provide a data directory
+    // through the `dirs` crate. Use the Android
+    // app's HOME directory instead.
+    #[cfg(target_os = "android")]
+    {
+        let app_dir = std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::env::temp_dir()
+            });
+
+        return app_dir.join("YAAS");
+    }
+
+    let data_dir =
+        dirs::data_dir()
+            .expect(
+                "Failed to get data directory"
+            );
+
     if cfg!(target_os = "macos") {
-        data_dir.join("io.github.skrimix.yaas")
+        data_dir.join(
+            "io.github.skrimix.yaas"
+        )
     } else {
         data_dir.join("YAAS")
     }
@@ -394,13 +655,31 @@ mod tests {
 
     use crate::init_in_dir;
 
-    #[tokio::test(flavor = "current_thread")]
+    #[tokio::test(
+        flavor = "current_thread"
+    )]
     #[ignore]
     async fn core_init_stable() {
-        let app_dir = tempfile::tempdir().expect("Failed to create temp dir");
-        timeout(Duration::from_secs(3), init_in_dir(app_dir.path().to_path_buf(), true))
-            .await
-            .unwrap();
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        let app_dir =
+            tempfile::tempdir()
+                .expect(
+                    "Failed to create temp dir"
+                );
+
+        timeout(
+            Duration::from_secs(3),
+            init_in_dir(
+                app_dir.path()
+                    .to_path_buf(),
+                true
+            )
+        )
+        .await
+        .unwrap();
+
+        tokio::time::sleep(
+            Duration::from_secs(3)
+        )
+        .await;
     }
 }
