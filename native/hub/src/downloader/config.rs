@@ -9,15 +9,12 @@ use crate::downloader::{SensitiveUrl, is_http_url};
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub(crate) struct DownloaderConfig {
-    /// ID of the config. Used for cache separation.
     pub id: String,
     #[serde(default)]
     pub display_name: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
-    /// URL used to update this downloader configuration.
     pub config_update_url: String,
-    /// Repository layout and its settings, selected by the `layout` field.
     #[serde(flatten)]
     pub backend: Backend,
 }
@@ -33,20 +30,16 @@ pub(crate) enum Backend {
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub(crate) struct FfaConfig {
-    // TODO: should this be a URI?
     pub rclone_path: RclonePath,
     pub rclone_config_path: String,
     #[serde(default)]
     pub remote_name_filter_regex: Option<String>,
     #[serde(default)]
     pub disable_randomize_remote: bool,
-    /// Optional remote used for app donation uploads. Set together with `donation_remote_path`.
     #[serde(default)]
     pub donation_remote_name: Option<String>,
-    /// Optional path within the donation remote where uploaded archives are placed.
     #[serde(default)]
     pub donation_remote_path: Option<String>,
-    /// Optional path on the configured rclone remote to a newline-separated donation blacklist.
     #[serde(default)]
     pub donation_blacklist_path: Option<String>,
     #[serde(default = "default_root_dir")]
@@ -57,7 +50,6 @@ pub(crate) struct FfaConfig {
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub(crate) struct NewRepoConfig {
-    /// Repository URL without a trailing slash.
     pub base_url: String,
 }
 
@@ -70,7 +62,10 @@ fn default_list_path() -> String {
 }
 
 fn non_empty(value: &Option<String>) -> Option<&str> {
-    value.as_deref().map(str::trim).filter(|value| !value.is_empty())
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 impl DownloaderConfig {
@@ -87,22 +82,42 @@ impl DownloaderConfig {
             .inspect_err(|e| {
                 error!("Failed to parse downloader.json: {:#}", e);
             })?;
+
         cfg.config_update_url = cfg.config_update_url.trim().to_string();
+
         if let Backend::NewRepo(repo) = &mut cfg.backend {
-            repo.base_url = repo.base_url.trim().trim_end_matches('/').to_string();
+            repo.base_url = repo
+                .base_url
+                .trim()
+                .trim_end_matches('/')
+                .to_string();
         }
+
         cfg.validate()?;
         Ok(cfg)
     }
 
     fn validate(&self) -> Result<()> {
         let trimmed_id = self.id.trim();
-        ensure!(!trimmed_id.is_empty(), "downloader.id must not be empty");
-        ensure!(trimmed_id == self.id, "downloader.id must not have surrounding whitespace");
+
         ensure!(
-            !self.id.contains('/') && !self.id.contains('\\') && self.id != "." && self.id != "..",
+            !trimmed_id.is_empty(),
+            "downloader.id must not be empty"
+        );
+
+        ensure!(
+            trimmed_id == self.id,
+            "downloader.id must not have surrounding whitespace"
+        );
+
+        ensure!(
+            !self.id.contains('/')
+                && !self.id.contains('\\')
+                && self.id != "."
+                && self.id != "..",
             "downloader.id must be a safe file name"
         );
+
         ensure_http_url("config_update_url", &self.config_update_url)?;
 
         match &self.backend {
@@ -111,29 +126,36 @@ impl DownloaderConfig {
                     !ffa.rclone_config_path.trim().is_empty(),
                     "rclone_config_path must not be empty"
                 );
-                let config_is_url = is_http_url(&ffa.rclone_config_path);
+
+                let config_is_url =
+                    is_http_url(&ffa.rclone_config_path);
+
                 ensure!(
-                    ffa.rclone_path.candidates().all(|path| is_http_url(path) == config_is_url),
+                    ffa.rclone_path
+                        .candidates()
+                        .all(|path| is_http_url(path) == config_is_url),
                     "rclone_path and rclone_config_path must both be local or both be URLs"
                 );
+
                 ensure!(
                     non_empty(&ffa.donation_remote_name).is_some()
                         == non_empty(&ffa.donation_remote_path).is_some(),
                     "donation_remote_name and donation_remote_path must be set together"
                 );
             }
-            Backend::NewRepo(repo) => ensure_http_url("base_url", &repo.base_url)?,
+
+            Backend::NewRepo(repo) => {
+                ensure_http_url("base_url", &repo.base_url)?
+            }
         }
 
         Ok(())
     }
 
-    /// Compares the configuration used by a session.
     pub(crate) fn same_runtime(&self, other: &Self) -> bool {
         self.id == other.id && self.backend == other.backend
     }
 
-    /// Returns the remote and path for app donation uploads, if configured.
     pub(crate) fn donation_target(&self) -> Option<(&str, &str)> {
         match &self.backend {
             Backend::Ffa(ffa) => ffa.donation_target(),
@@ -162,7 +184,10 @@ impl DownloaderConfig {
 
 impl FfaConfig {
     pub(crate) fn donation_target(&self) -> Option<(&str, &str)> {
-        Some((non_empty(&self.donation_remote_name)?, non_empty(&self.donation_remote_path)?))
+        Some((
+            non_empty(&self.donation_remote_name)?,
+            non_empty(&self.donation_remote_path)?,
+        ))
     }
 
     pub(crate) fn donation_blacklist_path(&self) -> Option<&str> {
@@ -172,12 +197,21 @@ impl FfaConfig {
 
 fn ensure_http_url(field: &str, value: &str) -> Result<()> {
     ensure!(!value.is_empty(), "{field} must not be empty");
+
     let parsed = reqwest::Url::parse(value)
-        .with_context(|| format!("Invalid {field}: {}", SensitiveUrl::new(value)))?;
+        .with_context(|| {
+            format!(
+                "Invalid {field}: {}",
+                SensitiveUrl::new(value)
+            )
+        })?;
+
     ensure!(
-        parsed.scheme() == "http" || parsed.scheme() == "https",
+        parsed.scheme() == "http"
+            || parsed.scheme() == "https",
         "{field} must use http or https"
     );
+
     Ok(())
 }
 
@@ -188,7 +222,8 @@ impl Default for DownloaderConfig {
             id: "test".to_string(),
             display_name: None,
             description: None,
-            config_update_url: "https://example.com/config.json".to_string(),
+            config_update_url:
+                "https://example.com/config.json".to_string(),
             backend: Backend::Ffa(FfaConfig::default()),
         }
     }
@@ -198,8 +233,10 @@ impl Default for DownloaderConfig {
 impl Default for FfaConfig {
     fn default() -> Self {
         Self {
-            rclone_path: RclonePath::Single("/bin/echo".to_string()),
-            rclone_config_path: "/tmp/rclone.conf".to_string(),
+            rclone_path:
+                RclonePath::Single("/bin/echo".to_string()),
+            rclone_config_path:
+                "/tmp/rclone.conf".to_string(),
             remote_name_filter_regex: None,
             disable_randomize_remote: false,
             donation_remote_name: None,
@@ -222,37 +259,72 @@ const CURRENT_PLATFORM: &str = std::env::consts::OS;
 
 #[cfg(target_arch = "x86_64")]
 const CURRENT_ARCH: &str = "x64";
+
 #[cfg(target_arch = "aarch64")]
 const CURRENT_ARCH: &str = "arm64";
+
 #[cfg(target_arch = "x86")]
 const CURRENT_ARCH: &str = "x86";
+
 #[cfg(target_arch = "arm")]
 const CURRENT_ARCH: &str = "arm";
 
-const CURRENT_PLATFORM_ARCH_KEY: &str = concatcp!(CURRENT_PLATFORM, "-", CURRENT_ARCH);
+const CURRENT_PLATFORM_ARCH_KEY: &str =
+    concatcp!(CURRENT_PLATFORM, "-", CURRENT_ARCH);
 
 impl RclonePath {
-    /// Returns the paths for all platforms.
     fn candidates(&self) -> impl Iterator<Item = &str> {
         let (single, map) = match self {
-            RclonePath::Single(s) => (Some(s.as_str()), None),
-            RclonePath::Map(map) => (None, Some(map.values().map(String::as_str))),
+            RclonePath::Single(s) => {
+                (Some(s.as_str()), None)
+            }
+
+            RclonePath::Map(map) => {
+                (None, Some(map.values().map(String::as_str)))
+            }
         };
-        single.into_iter().chain(map.into_iter().flatten())
+
+        single
+            .into_iter()
+            .chain(map.into_iter().flatten())
     }
 
-    pub(crate) fn resolve_for_current_platform(&self) -> Result<String> {
+    pub(crate) fn resolve_for_current_platform(
+        &self,
+    ) -> Result<String> {
         match self {
             RclonePath::Single(s) => Ok(s.clone()),
+
             RclonePath::Map(map) => {
-                if let Some(v) = map.get(CURRENT_PLATFORM_ARCH_KEY) {
-                    return Ok(v.clone());
-                }
-                if let Some(v) = map.get(CURRENT_PLATFORM) {
+                // 1. Exact platform + architecture
+                if let Some(v) =
+                    map.get(CURRENT_PLATFORM_ARCH_KEY)
+                {
                     return Ok(v.clone());
                 }
 
-                let available: Vec<&str> = map.keys().map(|k| k.as_str()).collect();
+                // 2. Platform only
+                if let Some(v) =
+                    map.get(CURRENT_PLATFORM)
+                {
+                    return Ok(v.clone());
+                }
+
+                // 3. Android ARM64 fallback
+                // Try Linux ARM64 binary.
+                if CURRENT_PLATFORM == "android"
+                    && CURRENT_ARCH == "arm64"
+                {
+                    if let Some(v) =
+                        map.get("linux-arm64")
+                    {
+                        return Ok(v.clone());
+                    }
+                }
+
+                let available: Vec<&str> =
+                    map.keys().map(|k| k.as_str()).collect();
+
                 Err(anyhow::anyhow!(
                     "rclone_path missing key: '{}-{}' or '{}' (available: {:?})",
                     CURRENT_PLATFORM,
@@ -266,13 +338,24 @@ impl RclonePath {
 }
 
 impl fmt::Display for RclonePath {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+    ) -> fmt::Result {
         match self.resolve_for_current_platform() {
             Ok(s) => write!(f, "{}", s),
+
             Err(_) => match self {
-                RclonePath::Single(s) => write!(f, "{}", s),
+                RclonePath::Single(s) => {
+                    write!(f, "{}", s)
+                }
+
                 RclonePath::Map(map) => {
-                    write!(f, "<map keys={:?}>", map.keys().collect::<Vec<_>>())
+                    write!(
+                        f,
+                        "<map keys={:?}>",
+                        map.keys().collect::<Vec<_>>()
+                    )
                 }
             },
         }
@@ -285,14 +368,20 @@ mod tests {
 
     use super::*;
 
-    fn write_file(path: &Path, content: &str) {
-        std::fs::write(path, content).expect("write file");
+    fn write_file(
+        path: &Path,
+        content: &str,
+    ) {
+        std::fs::write(path, content)
+            .expect("write file");
     }
 
     #[test]
     fn load_from_path_with_defaults_and_single_path() {
         let dir = tempdir().unwrap();
-        let cfg_path = dir.path().join("downloader.json");
+        let cfg_path =
+            dir.path().join("downloader.json");
+
         write_file(
             &cfg_path,
             r#"{
@@ -304,47 +393,123 @@ mod tests {
             }"#,
         );
 
-        let cfg = DownloaderConfig::load_from_path(&cfg_path).expect("load config");
-        assert_eq!(cfg.config_update_url, "https://example.com/config.json");
-        let Backend::Ffa(ffa) = cfg.backend else { panic!("expected ffa layout") };
-        assert_eq!(ffa.rclone_path, RclonePath::Single("/bin/echo".into()));
-        assert_eq!(ffa.rclone_config_path, "/tmp/rclone.conf");
+        let cfg =
+            DownloaderConfig::load_from_path(
+                &cfg_path
+            )
+            .expect("load config");
+
+        assert_eq!(
+            cfg.config_update_url,
+            "https://example.com/config.json"
+        );
+
+        let Backend::Ffa(ffa) = cfg.backend
+        else {
+            panic!("expected ffa layout")
+        };
+
+        assert_eq!(
+            ffa.rclone_path,
+            RclonePath::Single(
+                "/bin/echo".into()
+            )
+        );
+
+        assert_eq!(
+            ffa.rclone_config_path,
+            "/tmp/rclone.conf"
+        );
+
         assert!(!ffa.disable_randomize_remote);
-        assert_eq!(ffa.root_dir, "Quest Games");
-        assert_eq!(ffa.list_path, "FFA.txt");
+
+        assert_eq!(
+            ffa.root_dir,
+            "Quest Games"
+        );
+
+        assert_eq!(
+            ffa.list_path,
+            "FFA.txt"
+        );
     }
 
     #[test]
     fn rclone_path_map_resolves_platform_first_then_platform_only() {
-        // Build a map that includes both exact platform-arch and platform-only keys
         let mut map = HashMap::new();
-        map.insert(CURRENT_PLATFORM_ARCH_KEY.to_string(), String::from("/bin/exact"));
-        map.insert(CURRENT_PLATFORM.to_string(), String::from("/bin/platform"));
-        map.insert(String::from("other"), String::from("/bin/other"));
+
+        map.insert(
+            CURRENT_PLATFORM_ARCH_KEY.to_string(),
+            String::from("/bin/exact"),
+        );
+
+        map.insert(
+            CURRENT_PLATFORM.to_string(),
+            String::from("/bin/platform"),
+        );
+
+        map.insert(
+            String::from("other"),
+            String::from("/bin/other"),
+        );
 
         let path = RclonePath::Map(map);
-        let resolved = path.resolve_for_current_platform().expect("resolve current");
-        assert_eq!(resolved, "/bin/exact");
 
-        // Remove the exact key to ensure platform-only fallback
+        let resolved =
+            path.resolve_for_current_platform()
+                .expect("resolve current");
+
+        assert_eq!(
+            resolved,
+            "/bin/exact"
+        );
+
         let mut map2 = match path {
             RclonePath::Map(m) => m,
             _ => unreachable!(),
         };
-        map2.remove(CURRENT_PLATFORM_ARCH_KEY);
-        let path2 = RclonePath::Map(map2);
-        let resolved2 = path2.resolve_for_current_platform().expect("resolve platform only");
-        assert_eq!(resolved2, "/bin/platform");
+
+        map2.remove(
+            CURRENT_PLATFORM_ARCH_KEY
+        );
+
+        let path2 =
+            RclonePath::Map(map2);
+
+        let resolved2 =
+            path2.resolve_for_current_platform()
+                .expect("resolve platform only");
+
+        assert_eq!(
+            resolved2,
+            "/bin/platform"
+        );
     }
 
     #[test]
     fn rclone_path_map_errors_when_missing_keys() {
         let mut map = HashMap::new();
-        map.insert(String::from("irrelevant"), String::from("/bin/foo"));
-        let path = RclonePath::Map(map);
-        let err = path.resolve_for_current_platform().unwrap_err();
-        let msg = format!("{:#}", err);
-        assert!(msg.contains("rclone_path missing key"));
+
+        map.insert(
+            String::from("irrelevant"),
+            String::from("/bin/foo"),
+        );
+
+        let path =
+            RclonePath::Map(map);
+
+        let err =
+            path.resolve_for_current_platform()
+                .unwrap_err();
+
+        let msg =
+            format!("{:#}", err);
+
+        assert!(
+            msg.contains(
+                "rclone_path missing key"
+            )
+        );
     }
 
     #[test]
@@ -363,75 +528,178 @@ mod tests {
                 "config_update_url",
             ),
         ] {
-            let err = DownloaderConfig::parse(config).expect_err(error);
-            assert!(format!("{err:#}").contains(error), "{err:#}");
+            let err =
+                DownloaderConfig::parse(config)
+                    .expect_err(error);
+
+            assert!(
+                format!("{err:#}")
+                    .contains(error),
+                "{err:#}"
+            );
         }
     }
 
     #[test]
     fn newrepo_loads_without_rclone_fields() {
-        let cfg = DownloaderConfig::parse(
-            r#"{
-                "id": "new-repo",
-                "layout": "new-repo",
-                "base_url": "https://example.com/repo/",
-                "config_update_url": "https://example.com/config.json"
-            }"#,
-        )
-        .expect("load config");
+        let cfg =
+            DownloaderConfig::parse(
+                r#"{
+                    "id": "new-repo",
+                    "layout": "new-repo",
+                    "base_url": "https://example.com/repo/",
+                    "config_update_url": "https://example.com/config.json"
+                }"#,
+            )
+            .expect("load config");
+
         assert_eq!(
             cfg.backend,
-            Backend::NewRepo(NewRepoConfig { base_url: "https://example.com/repo".into() })
+            Backend::NewRepo(
+                NewRepoConfig {
+                    base_url:
+                        "https://example.com/repo"
+                            .into()
+                }
+            )
         );
     }
 
     #[test]
     fn ffa_rejects_mixed_url_and_local_rclone_files() {
         let mut map = HashMap::new();
-        map.insert(CURRENT_PLATFORM.to_string(), "/bin/rclone".to_string());
-        map.insert("other".to_string(), "https://example.com/rclone".to_string());
-        let cfg = DownloaderConfig {
-            backend: Backend::Ffa(FfaConfig {
-                rclone_path: RclonePath::Map(map),
+
+        map.insert(
+            CURRENT_PLATFORM.to_string(),
+            "/bin/rclone".to_string(),
+        );
+
+        map.insert(
+            "other".to_string(),
+            "https://example.com/rclone"
+                .to_string(),
+        );
+
+        let cfg =
+            DownloaderConfig {
+                backend:
+                    Backend::Ffa(
+                        FfaConfig {
+                            rclone_path:
+                                RclonePath::Map(map),
+                            ..Default::default()
+                        }
+                    ),
                 ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let err = cfg.validate().unwrap_err();
-        assert!(format!("{err:#}").contains("must both be local or both be URLs"));
+            };
+
+        let err =
+            cfg.validate().unwrap_err();
+
+        assert!(
+            format!("{err:#}")
+                .contains(
+                    "must both be local or both be URLs"
+                )
+        );
     }
 
     #[test]
     fn donation_remote_name_and_path_are_set_together() {
-        let ffa = |name: Option<&str>, path: Option<&str>| DownloaderConfig {
-            backend: Backend::Ffa(FfaConfig {
-                donation_remote_name: name.map(Into::into),
-                donation_remote_path: path.map(Into::into),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        assert!(ffa(Some("remote"), None).validate().is_err());
-        assert!(ffa(Some(" "), Some("path")).validate().is_err());
-        assert!(ffa(None, None).validate().is_ok());
-        let cfg = ffa(Some("remote"), Some("path"));
+        let ffa =
+            |name: Option<&str>,
+             path: Option<&str>|
+             -> DownloaderConfig {
+                DownloaderConfig {
+                    backend:
+                        Backend::Ffa(
+                            FfaConfig {
+                                donation_remote_name:
+                                    name.map(Into::into),
+                                donation_remote_path:
+                                    path.map(Into::into),
+                                ..Default::default()
+                            }
+                        ),
+                    ..Default::default()
+                }
+            };
+
+        assert!(
+            ffa(Some("remote"), None)
+                .validate()
+                .is_err()
+        );
+
+        assert!(
+            ffa(Some(" "), Some("path"))
+                .validate()
+                .is_err()
+        );
+
+        assert!(
+            ffa(None, None)
+                .validate()
+                .is_ok()
+        );
+
+        let cfg =
+            ffa(
+                Some("remote"),
+                Some("path")
+            );
+
         cfg.validate().unwrap();
-        assert_eq!(cfg.donation_target(), Some(("remote", "path")));
+
+        assert_eq!(
+            cfg.donation_target(),
+            Some(("remote", "path"))
+        );
     }
 
     #[test]
     fn runtime_comparison_ignores_metadata() {
-        let cfg = DownloaderConfig {
-            backend: Backend::NewRepo(NewRepoConfig { base_url: "http://example.com".into() }),
-            ..Default::default()
-        };
-        let mut changed = cfg.clone();
-        changed.display_name = Some("Name".into());
-        changed.description = Some("Description".into());
-        changed.config_update_url = "http://example.com/new".into();
-        assert!(cfg.same_runtime(&changed));
+        let cfg =
+            DownloaderConfig {
+                backend:
+                    Backend::NewRepo(
+                        NewRepoConfig {
+                            base_url:
+                                "http://example.com"
+                                    .into(),
+                        }
+                    ),
+                ..Default::default()
+            };
+
+        let mut changed =
+            cfg.clone();
+
+        changed.display_name =
+            Some("Name".into());
+
+        changed.description =
+            Some("Description".into());
+
+        changed.config_update_url =
+            "http://example.com/new"
+                .into();
+
+        assert!(
+            cfg.same_runtime(&changed)
+        );
+
         changed.backend =
-            Backend::NewRepo(NewRepoConfig { base_url: "http://other.example.com".into() });
-        assert!(!cfg.same_runtime(&changed));
+            Backend::NewRepo(
+                NewRepoConfig {
+                    base_url:
+                        "http://other.example.com"
+                            .into(),
+                }
+            );
+
+        assert!(
+            !cfg.same_runtime(&changed)
+        );
     }
 }
