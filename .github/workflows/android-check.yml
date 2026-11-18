@@ -15,7 +15,7 @@ jobs:
 
     steps:
       # =========================
-      # 1. YAAS
+      # 1. Checkout
       # =========================
       - name: Checkout YAAS
         uses: actions/checkout@v4
@@ -53,7 +53,7 @@ jobs:
           cache: true
 
       # =========================
-      # 6. Android project
+      # 6. Generate Android project
       # =========================
       - name: Generate Android project
         run: |
@@ -83,83 +83,136 @@ jobs:
           sdkmanager "ndk;28.2.13676358"
 
       # =========================
-      # 9. Flutter dependencies
+      # 9. Disable broken release Lint
+      # =========================
+      - name: Disable release Lint
+        shell: bash
+        run: |
+          KTS="android/app/build.gradle.kts"
+          GROOVY="android/app/build.gradle"
+
+          if [ -f "$KTS" ]; then
+            cat >> "$KTS" <<'EOF'
+
+          // YAAS Android build:
+          // video_player_android currently crashes Android Lint
+          // during lintVitalAnalyzeRelease.
+          android {
+              lint {
+                  checkReleaseBuilds = false
+                  abortOnError = false
+              }
+          }
+          EOF
+
+            echo "Added release Lint configuration to build.gradle.kts"
+
+          elif [ -f "$GROOVY" ]; then
+            cat >> "$GROOVY" <<'EOF'
+
+          // YAAS Android build:
+          // video_player_android currently crashes Android Lint
+          // during lintVitalAnalyzeRelease.
+          android {
+              lint {
+                  checkReleaseBuilds false
+                  abortOnError false
+              }
+          }
+          EOF
+
+            echo "Added release Lint configuration to build.gradle"
+
+          else
+            echo "ERROR: Android Gradle file not found"
+            exit 1
+          fi
+
+      # =========================
+      # 10. Flutter dependencies
       # =========================
       - name: Get Flutter dependencies
         run: |
           flutter pub get
 
       # =========================
-      # 10. Generate Rinf bindings
+      # 11. Generate Rinf bindings
       # =========================
       - name: Generate Rinf bindings
         run: |
           rinf gen
 
       # =========================
-      # 11. Check bindings
+      # 12. Check Rinf
       # =========================
       - name: Check generated bindings
         run: |
-          echo "Checking Rinf bindings..."
-
           test -s lib/src/bindings/bindings.dart
           test -s lib/src/bindings/signals/signals.dart
 
           echo "Rinf bindings OK"
 
       # =========================
-      # 12. Flutter doctor
+      # 13. Clean
       # =========================
-      - name: Flutter doctor
-        run: |
-          flutter doctor -v
-
-      # =========================
-      # 13. Build RELEASE APK
-      # =========================
-      - name: Build Android Release APK
+      - name: Flutter clean
         run: |
           flutter clean
           flutter pub get
           rinf gen
 
+      # =========================
+      # 14. Build RELEASE APK
+      # =========================
+      - name: Build release APK
+        run: |
           flutter build apk --release
 
       # =========================
-      # 14. Find APK
+      # 15. Find APK
       # =========================
-      - name: Check APK
+      - name: Check APK exists
         shell: bash
         run: |
           APK="build/app/outputs/flutter-apk/app-release.apk"
 
-          if [ ! -f "$APK" ]; then
-            echo "ERROR: APK not found"
+          if [ ! -s "$APK" ]; then
+            echo "ERROR: APK was not created"
+
+            echo
+            echo "Available APK files:"
             find build -type f -name "*.apk" -print
+
             exit 1
           fi
 
-          echo "=============================="
-          echo "APK FOUND"
-          echo "=============================="
+          echo "================================"
+          echo "APK CREATED SUCCESSFULLY"
+          echo "================================"
 
           ls -lh "$APK"
 
-          echo
-          echo "FILE:"
+      # =========================
+      # 16. APK integrity
+      # =========================
+      - name: Verify APK integrity
+        shell: bash
+        run: |
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+
+          echo "===== FILE ====="
           file "$APK"
 
           echo
-          echo "SHA256:"
+          echo "===== SHA256 ====="
           sha256sum "$APK"
 
           echo
-          echo "ZIP TEST:"
+          echo "===== ZIP TEST ====="
           unzip -t "$APK"
 
       # =========================
-      # 15. Verify APK signature
+      # 17. Verify signature
       # =========================
       - name: Verify APK signature
         shell: bash
@@ -177,17 +230,15 @@ jobs:
             exit 1
           fi
 
-          echo "Using:"
+          echo "Using apksigner:"
           echo "$APKSIGNER"
 
-          echo
-          echo "APK SIGNATURE:"
           "$APKSIGNER" verify --verbose "$APK"
 
       # =========================
-      # 16. APK information
+      # 18. APK package information
       # =========================
-      - name: Check APK package
+      - name: Inspect APK
         shell: bash
         run: |
           APK="build/app/outputs/flutter-apk/app-release.apk"
@@ -203,11 +254,10 @@ jobs:
             exit 1
           fi
 
-          echo "APK BADGING:"
-          "$AAPT2" dump badging "$APK" | head -n 40
+          "$AAPT2" dump badging "$APK" | head -n 50
 
       # =========================
-      # 17. Create GitHub Release
+      # 19. GitHub Release
       # =========================
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -215,19 +265,23 @@ jobs:
           tag_name: android-release-${{ github.run_number }}
           name: YAAS Android Release ${{ github.run_number }}
           body: |
-            YAAS Android ARM64 Release
+            YAAS Android Release
 
             Commit:
             ${{ github.sha }}
 
+            Flutter:
+            stable
+
             Build:
-            Flutter Release APK
+            Release APK
 
-            Architecture:
-            ARM64 / arm64-v8a
+            Target:
+            Android ARM64
 
-            This release is the clean Android build
-            without the experimental bundled rclone.
+            Release Lint disabled because
+            video_player_android currently crashes
+            Android Lint during release analysis.
           files: |
             build/app/outputs/flutter-apk/app-release.apk
           prerelease: true
