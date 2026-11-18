@@ -1,0 +1,241 @@
+name: YAAS Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Забираем исходники
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2. Java
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # 3. Android SDK
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      # 4. Устанавливаем Android Build Tools
+      - name: Install Android SDK components
+        run: |
+          sdkmanager "platform-tools"
+          sdkmanager "platforms;android-35"
+          sdkmanager "build-tools;35.0.0"
+
+      # 5. Flutter
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.50.0"
+          channel: stable
+          cache: true
+
+      # 6. Проверяем Flutter
+      - name: Flutter doctor
+        run: |
+          flutter --version
+          flutter doctor -v
+
+      # 7. Зависимости
+      - name: Flutter pub get
+        run: flutter pub get
+
+      # 8. Генерация Rinf bindings
+      - name: Generate Rinf bindings
+        run: |
+          rinf gen
+
+      # 9. Проверяем, что bindings действительно появились
+      - name: Check generated bindings
+        run: |
+          echo "Checking generated files..."
+
+          if [ ! -f "lib/src/bindings/bindings.dart" ]; then
+            echo "ERROR: bindings.dart not found!"
+            exit 1
+          fi
+
+          if [ ! -f "lib/src/bindings/signals/signals.dart" ]; then
+            echo "ERROR: signals.dart not found!"
+            exit 1
+          fi
+
+          echo "bindings.dart OK"
+          echo "signals.dart OK"
+
+      # 10. Очистка
+      - name: Flutter clean
+        run: flutter clean
+
+      # 11. Повторно получаем зависимости после clean
+      - name: Flutter pub get after clean
+        run: flutter pub get
+
+      # 12. Повторно генерируем bindings
+      - name: Generate Rinf bindings after clean
+        run: rinf gen
+
+      # 13. Проверяем bindings после генерации
+      - name: Verify bindings after generation
+        run: |
+          test -f lib/src/bindings/bindings.dart
+          test -f lib/src/bindings/signals/signals.dart
+
+          echo "Generated bindings are present."
+
+      # 14. Сборка APK
+      - name: Build Android APK
+        run: |
+          flutter build apk --release
+
+      # 15. Находим APK
+      - name: Locate APK
+        run: |
+          echo "APK files:"
+          find build/app/outputs/flutter-apk -type f -name "*.apk" -print
+
+      # 16. Устанавливаем необходимые инструменты проверки
+      - name: Prepare APK verification tools
+        run: |
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
+
+          echo "BUILD_TOOLS=$BUILD_TOOLS" >> "$GITHUB_ENV"
+
+          echo "zipalign:"
+          "$BUILD_TOOLS/zipalign" -h | head -n 3
+
+          echo "apksigner:"
+          "$BUILD_TOOLS/apksigner" --version
+
+          echo "aapt2:"
+          "$BUILD_TOOLS/aapt2" version
+
+      # 17. Проверяем APK
+      - name: Verify APK
+        run: |
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+
+          if [ ! -f "$APK" ]; then
+            echo "ERROR: APK not found!"
+            exit 1
+          fi
+
+          echo ""
+          echo "======================================"
+          echo "APK INFORMATION"
+          echo "======================================"
+
+          ls -lh "$APK"
+
+          echo ""
+          echo "======================================"
+          echo "1. ZIP INTEGRITY"
+          echo "======================================"
+
+          unzip -t "$APK"
+
+          echo ""
+          echo "ZIP integrity: OK"
+
+          echo ""
+          echo "======================================"
+          echo "2. AndroidManifest.xml"
+          echo "======================================"
+
+          unzip -l "$APK" | grep "AndroidManifest.xml"
+
+          if ! unzip -l "$APK" | grep -q "AndroidManifest.xml"; then
+            echo "ERROR: AndroidManifest.xml not found!"
+            exit 1
+          fi
+
+          echo "AndroidManifest.xml: OK"
+
+          echo ""
+          echo "======================================"
+          echo "3. ARM64-v8a"
+          echo "======================================"
+
+          if unzip -l "$APK" | grep -q "lib/arm64-v8a/"; then
+            echo "ARM64-v8a: FOUND"
+          else
+            echo "ERROR: ARM64-v8a libraries not found!"
+            exit 1
+          fi
+
+          echo ""
+          echo "======================================"
+          echo "4. lib/arm64-v8a"
+          echo "======================================"
+
+          unzip -l "$APK" | grep "lib/arm64-v8a/"
+
+          echo ""
+          echo "ARM64 native libraries: OK"
+
+          echo ""
+          echo "======================================"
+          echo "5. AAPT2"
+          echo "======================================"
+
+          "$BUILD_TOOLS/aapt2" dump badging "$APK" > apk-badging.txt
+
+          cat apk-badging.txt
+
+          if grep -q "package:" apk-badging.txt; then
+            echo "AAPT2: OK"
+          else
+            echo "ERROR: AAPT2 could not read APK!"
+            exit 1
+          fi
+
+          echo ""
+          echo "======================================"
+          echo "6. APK ARCHITECTURE"
+          echo "======================================"
+
+          grep "native-code" apk-badging.txt || true
+
+          echo ""
+          echo "======================================"
+          echo "7. ZIPALIGN"
+          echo "======================================"
+
+          "$BUILD_TOOLS/zipalign" -c -P 16 -v 4 "$APK"
+
+          echo "ZIPALIGN: OK"
+
+          echo ""
+          echo "======================================"
+          echo "8. APK SIGNATURE"
+          echo "======================================"
+
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK"
+
+          echo ""
+          echo "APK SIGNATURE: OK"
+
+          echo ""
+          echo "======================================"
+          echo "ALL APK CHECKS PASSED"
+          echo "======================================"
+
+      # 18. Сохраняем APK
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: YAAS-Android-arm64
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+          retention-days: 30
