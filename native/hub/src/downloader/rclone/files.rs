@@ -1,3 +1,4 @@
+
 use std::{
     error::Error,
     path::{Path, PathBuf},
@@ -30,18 +31,124 @@ pub(crate) async fn prepare_rclone_files(
     cancel: &CancellationToken,
 ) -> Result<(PathBuf, PathBuf)> {
     ensure!(!cancel.is_cancelled(), "Downloader initialization cancelled");
-    let bin_source = cfg.rclone_path.resolve_for_current_platform()?;
-    let config_source = cfg.rclone_config_path.as_str();
 
-    // Validation guarantees both sources are URLs or both are local.
-    if !is_http_url(&bin_source) {
-        info!("Using local rclone binary and config");
-        return Ok((PathBuf::from(bin_source), PathBuf::from(config_source)));
+    #[cfg(target_os = "android")]
+    {
+        return prepare_android_rclone_files(cache_dir, cfg, cancel).await;
     }
 
-    let bin_dst = cache_dir.join(if cfg!(windows) { "rclone.exe" } else { "rclone" });
-    let conf_dst = cache_dir.join("rclone.conf");
+    #[cfg(not(target_os = "android"))]
+    {
+        let bin_source = cfg.rclone_path.resolve_for_current_platform()?;
+        let config_source = cfg.rclone_config_path.as_str();
 
+        if !is_http_url(&bin_source) {
+            info!("Using local rclone binary and config");
+            return Ok((
+                PathBuf::from(bin_source),
+                PathBuf::from(config_source),
+            ));
+        }
+
+        let bin_dst = cache_dir.join(
+            if cfg!(windows) {
+                "rclone.exe"
+            } else {
+                "rclone"
+            },
+        );
+
+        let conf_dst = cache_dir.join("rclone.conf");
+        let client = build_http_client()?;
+
+        ensure_remote_file(
+            &client,
+            config_source,
+            &conf_dst,
+            cache_dir,
+            false,
+            "rclone config",
+            cancel,
+        )
+        .await?;
+
+        if is_zip_url(&bin_source) {
+            ensure_remote_rclone_from_zip(
+                &client,
+                &bin_source,
+                cache_dir,
+                &bin_dst,
+                cancel,
+            )
+            .await?;
+        } else {
+            ensure_remote_file(
+                &client,
+                &bin_source,
+                &bin_dst,
+                cache_dir,
+                true,
+                "rclone binary",
+                cancel,
+            )
+            .await?;
+        }
+
+        Ok((bin_dst, conf_dst))
+    }
+}
+
+#[cfg(target_os = "android")]
+fn bundled_android_rclone_path() -> Result<PathBuf> {
+    let maps = std::fs::read_to_string("/proc/self/maps")
+        .context("Failed to inspect loaded Android libraries")?;
+
+    for line in maps.lines() {
+        let Some(mapped_path) = line.split_whitespace().last() else {
+            continue;
+        };
+
+        if mapped_path.ends_with("/libhub.so") {
+            let native_dir = Path::new(mapped_path)
+                .parent()
+                .context("YAAS native library path has no parent")?;
+
+            let rclone = native_dir.join("librclone.so");
+
+            ensure!(
+                rclone.is_file(),
+                "Bundled Android rclone not found: {}",
+                rclone.display()
+            );
+
+            return Ok(rclone);
+        }
+    }
+
+    anyhow::bail!(
+        "Could not locate libhub.so; cannot find bundled Android rclone"
+    )
+}
+
+#[cfg(target_os = "android")]
+async fn prepare_android_rclone_files(
+    cache_dir: &Path,
+    cfg: &FfaConfig,
+    cancel: &CancellationToken,
+) -> Result<(PathBuf, PathBuf)> {
+    ensure!(!cancel.is_cancelled(), "Downloader initialization cancelled");
+
+    let bin_path = bundled_android_rclone_path()?;
+    let config_source = cfg.rclone_config_path.as_str();
+
+    if !is_http_url(config_source) {
+        return Ok((
+            bin_path,
+            PathBuf::from(config_source),
+        ));
+    }
+
+    let conf_dst = cache_dir.join("rclone.conf");
     let client = build_http_client()?;
 
     ensure_remote_file(
@@ -55,26 +162,17 @@ pub(crate) async fn prepare_rclone_files(
     )
     .await?;
 
-    if is_zip_url(&bin_source) {
-        ensure_remote_rclone_from_zip(&client, &bin_source, cache_dir, &bin_dst, cancel).await?;
-    } else {
-        ensure_remote_file(
-            &client,
-            &bin_source,
-            &bin_dst,
-            cache_dir,
-            true,
-            "rclone binary",
-            cancel,
-        )
-        .await?;
-    }
+    info!("Using APK-bundled Android rclone");
 
-    Ok((bin_dst, conf_dst))
+    Ok((bin_path, conf_dst))
 }
 
 fn init_progress(bytes: u64, total: Option<u64>) {
-    DownloaderInitProgress { bytes, total_bytes: total }.send_signal_to_dart();
+    DownloaderInitProgress {
+        bytes,
+        total_bytes: total,
+    }
+    .send_signal_to_dart();
 }
 
 fn build_http_client() -> Result<reqwest::Client> {
@@ -124,7 +222,8 @@ async fn ensure_remote_file(
         Err(e) => {
             warn!(
                 error = e.as_ref() as &dyn Error,
-                "Failed to update {}, using cached copy if available", label
+                "Failed to update {}, using cached copy if available",
+                label
             );
             ensure!(
                 dst.exists(),
@@ -162,10 +261,15 @@ async fn ensure_remote_rclone_from_zip(
     {
         Ok(DownloadResult::NotModified) => {
             debug!("rclone.zip not modified");
+
             if bin_dst.exists() && md5_path.exists() {
-                // TODO: maybe we can remove this and similar checks, now that we have a cache dir per config?
-                match (compute_md5_file(bin_dst).await, fs::read_to_string(&md5_path).await) {
-                    (Ok(current), Ok(expected)) if current.trim() == expected.trim() => {
+                match (
+                    compute_md5_file(bin_dst).await,
+                    fs::read_to_string(&md5_path).await,
+                ) {
+                    (Ok(current), Ok(expected))
+                        if current.trim() == expected.trim() =>
+                    {
                         debug!("Existing rclone binary matches stored checksum");
                         return Ok(());
                     }
@@ -178,16 +282,40 @@ async fn ensure_remote_rclone_from_zip(
             }
 
             info!("Extracting rclone binary from cached zip");
-            extract_rclone_from_zip(&zip_path, cache_dir, bin_dst, cancel).await?;
+            extract_rclone_from_zip(
+                &zip_path,
+                cache_dir,
+                bin_dst,
+                cancel,
+            )
+            .await?;
+
             if let Err(e) = write_md5_file(bin_dst, &md5_path).await {
-                warn!(error = e.as_ref() as &dyn Error, "Failed to write rclone MD5 stamp");
+                warn!(
+                    error = e.as_ref() as &dyn Error,
+                    "Failed to write rclone MD5 stamp"
+                );
             }
         }
         Ok(DownloadResult::Downloaded(_)) => {
-            info!(path = %zip_path.display(), "Fetched rclone zip, extracting binary");
-            extract_rclone_from_zip(&zip_path, cache_dir, bin_dst, cancel).await?;
+            info!(
+                path = %zip_path.display(),
+                "Fetched rclone zip, extracting binary"
+            );
+
+            extract_rclone_from_zip(
+                &zip_path,
+                cache_dir,
+                bin_dst,
+                cancel,
+            )
+            .await?;
+
             if let Err(e) = write_md5_file(bin_dst, &md5_path).await {
-                warn!(error = e.as_ref() as &dyn Error, "Failed to write rclone MD5 stamp");
+                warn!(
+                    error = e.as_ref() as &dyn Error,
+                    "Failed to write rclone MD5 stamp"
+                );
             }
         }
         Err(e) => {
@@ -195,15 +323,27 @@ async fn ensure_remote_rclone_from_zip(
                 error = e.as_ref() as &dyn Error,
                 "Failed to update rclone.zip, attempting to use cached copy",
             );
+
             ensure!(
                 zip_path.exists(),
                 "Failed to download rclone zip and no cached copy available: {:#}",
                 e
             );
+
             if !bin_dst.exists() {
-                extract_rclone_from_zip(&zip_path, cache_dir, bin_dst, cancel).await?;
+                extract_rclone_from_zip(
+                    &zip_path,
+                    cache_dir,
+                    bin_dst,
+                    cancel,
+                )
+                .await?;
+
                 if let Err(e) = write_md5_file(bin_dst, &md5_path).await {
-                    warn!(error = e.as_ref() as &dyn Error, "Failed to write rclone MD5 stamp");
+                    warn!(
+                        error = e.as_ref() as &dyn Error,
+                        "Failed to write rclone MD5 stamp"
+                    );
                 }
             }
         }
@@ -228,42 +368,82 @@ async fn extract_rclone_from_zip(
 ) -> Result<()> {
     let entries = list_archive_file_paths(zip_path, Some(cancel))
         .await
-        .with_context(|| format!("Failed to list entries of {}", zip_path.display()))?;
+        .with_context(|| {
+            format!("Failed to list entries of {}", zip_path.display())
+        })?;
 
-    let target_name = if cfg!(windows) { "rclone.exe" } else { "rclone" };
+    let target_name = if cfg!(windows) {
+        "rclone.exe"
+    } else {
+        "rclone"
+    };
 
-    // Prefer root-level file; otherwise a nested entry like "rclone-v.../rclone"
     let mut candidates: Vec<&str> = entries
         .iter()
         .filter_map(|p| {
             let last = p.rsplit('/').next().unwrap_or(p.as_str());
-            if last == target_name { Some(p.as_str()) } else { None }
+
+            if last == target_name {
+                Some(p.as_str())
+            } else {
+                None
+            }
         })
         .collect();
 
-    ensure!(!candidates.is_empty(), "No '{}' entry found in {}", target_name, zip_path.display());
+    ensure!(
+        !candidates.is_empty(),
+        "No '{}' entry found in {}",
+        target_name,
+        zip_path.display()
+    );
 
-    // Pick the shortest path to prefer root-level when present
     candidates.sort_by_key(|s| s.len());
     let chosen = candidates[0];
 
-    extract_single_from_archive(zip_path, cache_dir, chosen, Some(cancel))
-        .await
-        .with_context(|| format!("Failed to extract '{}' from {}", chosen, zip_path.display()))?;
+    extract_single_from_archive(
+        zip_path,
+        cache_dir,
+        chosen,
+        Some(cancel),
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "Failed to extract '{}' from {}",
+            chosen,
+            zip_path.display()
+        )
+    })?;
 
     let extracted_path = cache_dir.join(target_name);
+
     if extracted_path != bin_dst {
         fs::rename(&extracted_path, bin_dst)
             .await
-            .with_context(|| format!("Failed to place rclone to {}", bin_dst.display()))?;
+            .with_context(|| {
+                format!(
+                    "Failed to place rclone to {}",
+                    bin_dst.display()
+                )
+            })?;
     }
 
     Ok(())
 }
 
-async fn write_md5_file(bin_dst: &Path, md5_path: &Path) -> Result<()> {
-    let md5 = compute_md5_file(bin_dst).await.context("Failed to compute MD5")?;
-    fs::write(md5_path, md5.into_bytes()).await.context("Failed to write MD5 file")?;
+async fn write_md5_file(
+    bin_dst: &Path,
+    md5_path: &Path,
+) -> Result<()> {
+    let md5 = compute_md5_file(bin_dst)
+        .await
+        .context("Failed to compute MD5")?;
+
+    fs::write(md5_path, md5.into_bytes())
+        .await
+        .context("Failed to write MD5 file")?;
+
     Ok(())
 }
 
@@ -291,9 +471,15 @@ mod tests {
     async fn prepare_files_returns_local_paths_when_both_local() {
         let dir = tempdir().unwrap();
         let cfg = cfg_local("/bin/echo", "/tmp/rclone.conf");
-        let (bin, conf) = prepare_rclone_files(dir.path(), &cfg, &CancellationToken::new())
-            .await
-            .expect("Prepare files failed");
+
+        let (bin, conf) = prepare_rclone_files(
+            dir.path(),
+            &cfg,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("Prepare files failed");
+
         assert_eq!(bin, PathBuf::from("/bin/echo"));
         assert_eq!(conf, PathBuf::from("/tmp/rclone.conf"));
     }
@@ -302,13 +488,13 @@ mod tests {
     async fn prepare_files_downloads_and_caches_http() {
         let dir = tempdir().unwrap();
         let server = MockServer::start().await;
+
         let conf_path = "/rclone.conf";
         let bin_path = "/rclone";
         let conf_etag = "\"conf-etag\"";
         let bin_etag = "\"bin-etag\"";
         let last_modified = "Wed, 21 Oct 2015 07:28:00 GMT";
 
-        // First-run mocks: 200 with ETag + Last-Modified
         Mock::given(method("GET"))
             .and(path(conf_path))
             .respond_with(
@@ -331,7 +517,6 @@ mod tests {
             .mount(&server)
             .await;
 
-        // Second-run mocks: require caching headers and return 304
         Mock::given(method("GET"))
             .and(path(conf_path))
             .and(header("If-None-Match", conf_etag))
@@ -349,30 +534,53 @@ mod tests {
             .await;
 
         let cfg = FfaConfig {
-            rclone_path: RclonePath::Single(format!("{}{}", server.uri(), bin_path)),
-            rclone_config_path: format!("{}{}", server.uri(), conf_path),
+            rclone_path: RclonePath::Single(
+                format!("{}{}", server.uri(), bin_path),
+            ),
+            rclone_config_path: format!(
+                "{}{}",
+                server.uri(),
+                conf_path
+            ),
             disable_randomize_remote: true,
             ..Default::default()
         };
 
-        // First run downloads both files
-        let (bin, conf) = prepare_rclone_files(dir.path(), &cfg, &CancellationToken::new())
-            .await
-            .expect("First run failed");
+        let (bin, conf) = prepare_rclone_files(
+            dir.path(),
+            &cfg,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("First run failed");
+
         assert!(bin.exists());
         assert!(conf.exists());
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = tokio::fs::metadata(&bin).await.unwrap().permissions().mode();
-            assert!(mode & 0o111 != 0, "Binary should be executable");
+
+            let mode = tokio::fs::metadata(&bin)
+                .await
+                .unwrap()
+                .permissions()
+                .mode();
+
+            assert!(
+                mode & 0o111 != 0,
+                "Binary should be executable"
+            );
         }
 
-        // Second run: server replies 304, function should still succeed and use cache
-        let (bin2, conf2) = prepare_rclone_files(dir.path(), &cfg, &CancellationToken::new())
-            .await
-            .expect("Second run failed");
+        let (bin2, conf2) = prepare_rclone_files(
+            dir.path(),
+            &cfg,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("Second run failed");
+
         assert_eq!(bin2, bin);
         assert_eq!(conf2, conf);
     }
