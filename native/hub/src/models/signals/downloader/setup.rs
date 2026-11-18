@@ -1,3 +1,4 @@
+
 use rinf::{DartSignal, RustSignal};
 
 use crate::models::InstalledDownloaderConfig;
@@ -5,6 +6,9 @@ use crate::models::InstalledDownloaderConfig;
 #[derive(serde::Serialize, serde::Deserialize, DartSignal)]
 pub(crate) struct InstallDownloaderConfigFromUrlRequest {
     pub url: String,
+
+    #[serde(default)]
+    pub rclone_config_password: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, DartSignal)]
