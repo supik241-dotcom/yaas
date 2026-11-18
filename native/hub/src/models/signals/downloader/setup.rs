@@ -12,7 +12,10 @@ pub(crate) struct InstallDownloaderConfigFromUrlRequest {
 }
 
 #[derive(serde::Serialize, serde::Deserialize, DartSignal)]
-pub(crate) struct RetryDownloaderInitRequest {}
+pub(crate) struct RetryDownloaderInitRequest {
+    #[serde(default)]
+    pub rclone_config_password: Option<String>,
+}
 
 #[derive(serde::Serialize, serde::Deserialize, DartSignal)]
 pub(crate) struct RefreshDownloaderSourcesRequest {}
