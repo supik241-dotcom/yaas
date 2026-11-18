@@ -1,3 +1,4 @@
+
 use std::{collections::HashSet, error::Error, path::Path};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -35,25 +36,33 @@ impl FFARepo {
         settings: &Settings,
         cancel: &CancellationToken,
     ) -> Result<(Self, Option<String>)> {
-        if cfg.donation_target().is_some() && cfg.donation_blacklist_path().is_none() {
+        if cfg.donation_target().is_some()
+            && cfg.donation_blacklist_path().is_none()
+        {
             warn!(
                 "App donation remote is configured but `donation_blacklist_path` is missing; \
                  donation blacklist will be disabled"
             );
         }
+
         let (rclone_path, rclone_config_path) =
             rclone::prepare_rclone_files(cache_dir, cfg, cancel).await?;
+
         let remote = cancel
             .run_until_cancelled(pick_remote_name(
                 &rclone_path,
                 &rclone_config_path,
+                cfg.rclone_config_password.clone(),
                 cfg.remote_name_filter_regex.as_deref(),
                 &settings.rclone_remote_name,
                 !cfg.disable_randomize_remote,
             ))
             .await
             .context("Downloader initialization cancelled")??;
-        let persist = (remote != settings.rclone_remote_name).then(|| remote.clone());
+
+        let persist =
+            (remote != settings.rclone_remote_name).then(|| remote.clone());
+
         let storage = RcloneStorage::new(
             rclone_path,
             rclone_config_path,
@@ -61,7 +70,9 @@ impl FFARepo {
             remote,
             settings.bandwidth_limit.clone(),
             cfg.remote_name_filter_regex.clone(),
+            cfg.rclone_config_password.clone(),
         );
+
         Ok((Self { config: cfg.clone(), storage }, persist))
     }
 
@@ -73,13 +84,18 @@ impl FFARepo {
         self.storage.set_bandwidth_limit(limit);
     }
 
-    pub(super) async fn select_remote(&mut self, requested: &str) -> Result<String> {
+    pub(super) async fn select_remote(
+        &mut self,
+        requested: &str,
+    ) -> Result<String> {
         let remotes = self.storage.remotes().await?;
+
         let remote = if remotes.iter().any(|r| r == requested) {
             requested.to_string()
         } else {
             remotes.first().context("Remote list is empty")?.clone()
         };
+
         self.storage.set_remote(remote.clone());
         Ok(remote)
     }
@@ -101,21 +117,33 @@ impl FFARepo {
         self.storage.remotes().await
     }
 
-    #[instrument(level = "debug", name = "repo.load_app_list", skip(self, cancellation_token), fields(layout = %self.id()))]
+    #[instrument(
+        level = "debug",
+        name = "repo.load_app_list",
+        skip(self, cancellation_token),
+        fields(layout = %self.id())
+    )]
     pub(super) async fn load_app_list(
         &self,
         cache_dir: &Path,
         cancellation_token: CancellationToken,
     ) -> Result<RepoAppList> {
         let storage = &self.storage;
+
         let blacklist = async {
             if let Some(path) = self.config.donation_blacklist_path() {
-                load_blacklist_from_remote(storage, path, cache_dir, cancellation_token.clone())
-                    .await
+                load_blacklist_from_remote(
+                    storage,
+                    path,
+                    cache_dir,
+                    cancellation_token.clone(),
+                )
+                .await
             } else {
                 Ok(HashSet::new())
             }
         };
+
         let apps = async {
             let path = storage
                 .download_file(
@@ -126,11 +154,22 @@ impl FFARepo {
                 .await
                 .context("Failed to download app list file")?;
 
-            debug!(path = %path.display(), "App list file downloaded, parsing...");
-            let file = File::open(&path).await.context("Could not open app list file")?;
+            debug!(
+                path = %path.display(),
+                "App list file downloaded, parsing..."
+            );
+
+            let file = File::open(&path)
+                .await
+                .context("Could not open app list file")?;
+
             let mut reader =
-                csv_async::AsyncReaderBuilder::new().delimiter(b';').create_deserializer(file);
+                csv_async::AsyncReaderBuilder::new()
+                    .delimiter(b';')
+                    .create_deserializer(file);
+
             let records = reader.deserialize::<CloudApp>();
+
             let cloud_apps: Vec<CloudApp> = records
                 .enumerate()
                 .filter_map(|(idx, result)| async move {
@@ -148,14 +187,22 @@ impl FFARepo {
                 })
                 .collect()
                 .await;
+
             Ok::<_, anyhow::Error>(cloud_apps)
         };
+
         let (apps, blacklist) = tokio::join!(apps, blacklist);
+
         let cloud_apps = apps?;
-        let donation_blacklist = blacklist.unwrap_or_default().into_iter().collect();
+        let donation_blacklist =
+            blacklist.unwrap_or_default().into_iter().collect();
 
         Span::current().record("count", cloud_apps.len());
-        Ok(RepoAppList { apps: cloud_apps, donation_blacklist })
+
+        Ok(RepoAppList {
+            apps: cloud_apps,
+            donation_blacklist,
+        })
     }
 
     pub(super) async fn download_app(
@@ -166,13 +213,24 @@ impl FFARepo {
         cancellation_token: CancellationToken,
     ) -> Result<RepoDownloadResult> {
         let storage = &self.storage;
-        let _ = progress_tx.send(AppDownloadProgress::Status("Downloading files...".to_string()));
-        let (stats_tx, mut stats_rx) = tokio::sync::mpsc::unbounded_channel::<TransferStats>();
+
+        let _ = progress_tx.send(
+            AppDownloadProgress::Status(
+                "Downloading files...".to_string(),
+            ),
+        );
+
+        let (stats_tx, mut stats_rx) =
+            tokio::sync::mpsc::unbounded_channel::<TransferStats>();
+
         let forward_progress = tokio::spawn(async move {
             while let Some(stats) = stats_rx.recv().await {
-                let _ = progress_tx.send(AppDownloadProgress::Transfer(stats));
+                let _ = progress_tx.send(
+                    AppDownloadProgress::Transfer(stats),
+                );
             }
         });
+
         storage
             .download_dir_with_stats(
                 app_full_name.to_string(),
@@ -181,7 +239,9 @@ impl FFARepo {
                 cancellation_token,
             )
             .await?;
+
         let _ = forward_progress.await;
+
         Ok(RepoDownloadResult { skipped: false })
     }
 
@@ -192,10 +252,13 @@ impl FFARepo {
         cancellation_token: CancellationToken,
     ) -> Result<()> {
         let storage = &self.storage;
+
         let (remote, remote_path) = self
             .config
             .donation_target()
-            .context("App donation remote is not configured for this downloader source")?;
+            .context(
+                "App donation remote is not configured for this downloader source",
+            )?;
 
         ensure!(
             archive_path.is_file(),
@@ -220,25 +283,36 @@ impl FFARepo {
 async fn pick_remote_name(
     rclone_path: &Path,
     rclone_config_path: &Path,
+    config_password: Option<String>,
     remote_filter_regex: Option<&str>,
     current_remote: &str,
     allow_randomize: bool,
 ) -> Result<String> {
-    let remotes =
-        rclone::list_remotes(rclone_path, rclone_config_path, remote_filter_regex).await?;
+    let remotes = rclone::list_remotes(
+        rclone_path,
+        rclone_config_path,
+        remote_filter_regex,
+        config_password,
+    )
+    .await?;
 
     if remotes.is_empty() {
         bail!("Remote list is empty");
     }
 
     let mut chosen = current_remote.to_string();
+
     if allow_randomize {
         let mut rng = rand::rng();
+
         if let Some(choice) = remotes.choose(&mut rng) {
             chosen = choice.clone();
         }
     } else if remotes.iter().all(|r| r != current_remote) {
-        chosen = remotes.first().cloned().unwrap_or_else(|| current_remote.to_string());
+        chosen = remotes
+            .first()
+            .cloned()
+            .unwrap_or_else(|| current_remote.to_string());
     }
 
     Ok(chosen)
@@ -248,7 +322,10 @@ async fn pick_remote_name(
     level = "debug",
     name = "load_blacklist_from_remote",
     skip(storage),
-    fields(path = %remote_path, cache_dir = %cache_dir.display())
+    fields(
+        path = %remote_path,
+        cache_dir = %cache_dir.display()
+    )
 )]
 async fn load_blacklist_from_remote(
     storage: &RcloneStorage,
@@ -257,7 +334,11 @@ async fn load_blacklist_from_remote(
     cancellation_token: CancellationToken,
 ) -> Result<HashSet<String>> {
     match storage
-        .download_file(remote_path.to_string(), cache_dir.to_path_buf(), Some(cancellation_token))
+        .download_file(
+            remote_path.to_string(),
+            cache_dir.to_path_buf(),
+            Some(cancellation_token),
+        )
         .await
     {
         Ok(path) => load_blacklist_from_path(&path).await,
@@ -267,6 +348,7 @@ async fn load_blacklist_from_remote(
                 path = remote_path,
                 "Failed to download donation blacklist, continuing without it"
             );
+
             Ok(HashSet::new())
         }
     }
@@ -277,9 +359,15 @@ async fn load_blacklist_from_remote(
     name = "load_blacklist_from_path",
     fields(path = %path.display())
 )]
-async fn load_blacklist_from_path(path: &Path) -> Result<HashSet<String>> {
+async fn load_blacklist_from_path(
+    path: &Path,
+) -> Result<HashSet<String>> {
     if !path.exists() {
-        warn!(path = %path.display(), "Donation blacklist file does not exist");
+        warn!(
+            path = %path.display(),
+            "Donation blacklist file does not exist"
+        );
+
         return Ok(HashSet::new());
     }
 
@@ -291,6 +379,7 @@ async fn load_blacklist_from_path(path: &Path) -> Result<HashSet<String>> {
                 path = %path.display(),
                 "Failed to read donation blacklist file, continuing without it"
             );
+
             Ok(HashSet::new())
         }
     }
