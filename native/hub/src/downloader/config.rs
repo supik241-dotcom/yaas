@@ -1,3 +1,4 @@
+
 use std::{collections::HashMap, fmt, fs, path::Path};
 
 use anyhow::{Context, Result, ensure};
@@ -308,18 +309,6 @@ impl RclonePath {
                     map.get(CURRENT_PLATFORM)
                 {
                     return Ok(v.clone());
-                }
-
-                // 3. Android ARM64 fallback
-                // Try Linux ARM64 binary.
-                if CURRENT_PLATFORM == "android"
-                    && CURRENT_ARCH == "arm64"
-                {
-                    if let Some(v) =
-                        map.get("linux-arm64")
-                    {
-                        return Ok(v.clone());
-                    }
                 }
 
                 let available: Vec<&str> =
