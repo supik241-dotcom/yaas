@@ -1,4 +1,3 @@
-
 name: Android APK
 
 on:
@@ -48,79 +47,11 @@ jobs:
           accept-android-sdk-licenses: true
           log-accepted-android-sdk-licenses: true
 
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses
+
       - name: Install Android NDK
         run: sdkmanager "ndk;28.2.13676358"
-
-      - name: Checkout rclone
-        uses: actions/checkout@v4
-        with:
-          repository: rclone/rclone
-          ref: v1.75.2
-          path: rclone-src
-          fetch-depth: 1
-
-      - name: Setup Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: rclone-src/go.mod
-          cache-dependency-path: rclone-src/go.sum
-
-      - name: Build Android rclone
-        run: |
-          NDK="$ANDROID_HOME/ndk/28.2.13676358"
-          CC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
-          OUT="android/app/src/main/jniLibs/arm64-v8a/librclone.so"
-
-          test -x "$CC"
-          mkdir -p "$(dirname "$OUT")"
-
-          cd rclone-src
-
-          env GOOS=android GOARCH=arm64 CGO_ENABLED=1 \
-            CC="$CC" \
-            CGO_LDFLAGS="-fuse-ld=lld -s -w" \
-            go build -v -tags android -trimpath \
-            -ldflags="-s -w -X github.com/rclone/rclone/fs.Version=v1.75.2" \
-            -o "../$OUT" .
-
-          file "../$OUT"
-          readelf -h "../$OUT" | grep AArch64
-          test -s "../$OUT"
-
-      - name: Configure native library packaging
-        shell: bash
-        run: |
-          KTS="android/app/build.gradle.kts"
-          GROOVY="android/app/build.gradle"
-
-          if [ -f "$KTS" ]; then
-            cat >> "$KTS" <<'EOF'
-
-          android {
-              packaging {
-                  jniLibs {
-                      useLegacyPackaging = true
-                      keepDebugSymbols += "**/librclone.so"
-                  }
-              }
-          }
-          EOF
-          elif [ -f "$GROOVY" ]; then
-            cat >> "$GROOVY" <<'EOF'
-
-          android {
-              packaging {
-                  jniLibs {
-                      useLegacyPackaging true
-                      keepDebugSymbols += ['**/librclone.so']
-                  }
-              }
-          }
-          EOF
-          else
-            echo "Gradle file not found"
-            exit 1
-          fi
 
       - name: Get dependencies
         run: flutter pub get
@@ -130,27 +61,56 @@ jobs:
 
       - name: Check generated files
         run: |
-          test -f lib/src/bindings/bindings.dart
-          test -f lib/src/bindings/signals/signals.dart
+          echo "Checking Rinf bindings..."
+          test -s lib/src/bindings/bindings.dart
+          test -s lib/src/bindings/signals/signals.dart
+          echo "Rinf bindings OK"
 
       - name: Build ARM64 APK
         run: flutter build apk --debug --split-per-abi
 
-      - name: Verify APK
+      - name: Check APK
         run: |
-          APK=build/app/outputs/flutter-apk/app-arm64-v8a-debug.apk
+          APK="build/app/outputs/flutter-apk/app-arm64-v8a-debug.apk"
 
-          test -s "$APK"
-
-          echo "APK information:"
+          echo "===== APK FILE ====="
           ls -lh "$APK"
+
+          echo "===== FILE TYPE ====="
           file "$APK"
 
-          echo "APK SHA256:"
+          echo "===== APK CONTENT ====="
+          unzip -t "$APK"
+
+          echo "===== APK SHA256 ====="
           sha256sum "$APK"
 
-          echo "APK integrity:"
-          unzip -t "$APK"
+          echo "===== APK SIGNATURE ====="
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n 1)
+
+          if [ -n "$APKSIGNER" ]; then
+            "$APKSIGNER" verify --verbose "$APK"
+          else
+            echo "apksigner not found"
+            exit 1
+          fi
+
+          echo "===== APK BADGING ====="
+          AAPT2=$(find "$ANDROID_HOME/build-tools" -name aapt2 | sort -V | tail -n 1)
+
+          if [ -n "$AAPT2" ]; then
+            "$AAPT2" dump badging "$APK" | head -n 30
+          else
+            echo "aapt2 not found"
+            exit 1
+          fi
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: yaas-android-arm64-debug
+          path: build/app/outputs/flutter-apk/app-arm64-v8a-debug.apk
+          if-no-files-found: error
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -164,6 +124,8 @@ jobs:
 
             Target architecture:
             arm64-v8a
+
+            This build does not include the experimental bundled rclone.
           files: build/app/outputs/flutter-apk/app-arm64-v8a-debug.apk
           prerelease: true
           make_latest: false
