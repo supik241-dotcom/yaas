@@ -1,3 +1,4 @@
+
 name: YAAS Android APK
 
 on:
@@ -14,47 +15,35 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # =========================
       # 1. Checkout
-      # =========================
       - name: Checkout YAAS
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      # =========================
       # 2. Java
-      # =========================
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      # =========================
       # 3. Rust
-      # =========================
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # =========================
       # 4. Rinf
-      # =========================
       - name: Install Rinf CLI
         run: cargo install rinf_cli --locked
 
-      # =========================
       # 5. Flutter
-      # =========================
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
 
-      # =========================
       # 6. Generate Android project
-      # =========================
       - name: Generate Android project
         run: |
           flutter create \
@@ -62,9 +51,24 @@ jobs:
             --org com.yaas \
             .
 
-      # =========================
-      # 7. Android SDK
-      # =========================
+      # 7. Add Internet permission
+      - name: Add Android Internet permission
+        shell: bash
+        run: |
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+
+          if [ ! -f "$MANIFEST" ]; then
+            echo "ERROR: AndroidManifest.xml not found"
+            exit 1
+          fi
+
+          if ! grep -q 'android.permission.INTERNET' "$MANIFEST"; then
+            sed -i '/<manifest[^>]*>/a\    <uses-permission android:name="android.permission.INTERNET" />' "$MANIFEST"
+          fi
+
+          grep -n 'android.permission.INTERNET' "$MANIFEST"
+
+      # 8. Android SDK
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
         with:
@@ -75,16 +79,12 @@ jobs:
       - name: Accept Android SDK licenses
         run: yes | sdkmanager --licenses
 
-      # =========================
-      # 8. Android NDK
-      # =========================
+      # 9. Android NDK
       - name: Install Android NDK
         run: |
           sdkmanager "ndk;28.2.13676358"
 
-      # =========================
-      # 9. Disable broken release Lint
-      # =========================
+      # 10. Disable release Lint
       - name: Disable release Lint
         shell: bash
         run: |
@@ -94,9 +94,6 @@ jobs:
           if [ -f "$KTS" ]; then
             cat >> "$KTS" <<'EOF'
 
-          // YAAS Android build:
-          // video_player_android currently crashes Android Lint
-          // during lintVitalAnalyzeRelease.
           android {
               lint {
                   checkReleaseBuilds = false
@@ -104,15 +101,9 @@ jobs:
               }
           }
           EOF
-
-            echo "Added release Lint configuration to build.gradle.kts"
-
           elif [ -f "$GROOVY" ]; then
             cat >> "$GROOVY" <<'EOF'
 
-          // YAAS Android build:
-          // video_player_android currently crashes Android Lint
-          // during lintVitalAnalyzeRelease.
           android {
               lint {
                   checkReleaseBuilds false
@@ -120,57 +111,44 @@ jobs:
               }
           }
           EOF
-
-            echo "Added release Lint configuration to build.gradle"
-
           else
             echo "ERROR: Android Gradle file not found"
             exit 1
           fi
 
-      # =========================
-      # 10. Flutter dependencies
-      # =========================
+      # 11. Flutter dependencies
       - name: Get Flutter dependencies
-        run: |
-          flutter pub get
+        run: flutter pub get
 
-      # =========================
-      # 11. Generate Rinf bindings
-      # =========================
+      # 12. Generate Rinf bindings
       - name: Generate Rinf bindings
-        run: |
-          rinf gen
+        run: rinf gen
 
-      # =========================
-      # 12. Check Rinf
-      # =========================
+      # 13. Check generated bindings
       - name: Check generated bindings
         run: |
           test -s lib/src/bindings/bindings.dart
           test -s lib/src/bindings/signals/signals.dart
-
           echo "Rinf bindings OK"
 
-      # =========================
-      # 13. Clean
-      # =========================
+      # 14. Clean BEFORE generation
       - name: Flutter clean
+        run: flutter clean
+
+      # 15. Restore dependencies and bindings after clean
+      - name: Restore dependencies and generate bindings
         run: |
-          flutter clean
           flutter pub get
           rinf gen
 
-      # =========================
-      # 14. Build RELEASE APK
-      # =========================
-      - name: Build release APK
-        run: |
-          flutter build apk --release
+          test -s lib/src/bindings/bindings.dart
+          test -s lib/src/bindings/signals/signals.dart
 
-      # =========================
-      # 15. Find APK
-      # =========================
+      # 16. Build RELEASE APK
+      - name: Build release APK
+        run: flutter build apk --release
+
+      # 17. Check APK exists
       - name: Check APK exists
         shell: bash
         run: |
@@ -178,87 +156,80 @@ jobs:
 
           if [ ! -s "$APK" ]; then
             echo "ERROR: APK was not created"
-
-            echo
-            echo "Available APK files:"
             find build -type f -name "*.apk" -print
-
             exit 1
           fi
-
-          echo "================================"
-          echo "APK CREATED SUCCESSFULLY"
-          echo "================================"
 
           ls -lh "$APK"
 
-      # =========================
-      # 16. APK integrity
-      # =========================
-      - name: Verify APK integrity
-        shell: bash
-        run: |
-          APK="build/app/outputs/flutter-apk/app-release.apk"
-
-          echo "===== FILE ====="
-          file "$APK"
-
-          echo
-          echo "===== SHA256 ====="
-          sha256sum "$APK"
-
-          echo
-          echo "===== ZIP TEST ====="
-          unzip -t "$APK"
-
-      # =========================
-      # 17. Verify signature
-      # =========================
-      - name: Verify APK signature
-        shell: bash
-        run: |
-          APK="build/app/outputs/flutter-apk/app-release.apk"
-
-          APKSIGNER=$(find "$ANDROID_HOME/build-tools" \
-            -type f \
-            -name "apksigner" \
-            | sort -V \
-            | tail -n 1)
-
-          if [ -z "$APKSIGNER" ]; then
-            echo "ERROR: apksigner not found"
-            exit 1
-          fi
-
-          echo "Using apksigner:"
-          echo "$APKSIGNER"
-
-          "$APKSIGNER" verify --verbose "$APK"
-
-      # =========================
-      # 18. APK package information
-      # =========================
-      - name: Inspect APK
+      # 18. Verify Internet permission in APK
+      - name: Verify Internet permission in APK
         shell: bash
         run: |
           APK="build/app/outputs/flutter-apk/app-release.apk"
 
           AAPT2=$(find "$ANDROID_HOME/build-tools" \
-            -type f \
-            -name "aapt2" \
-            | sort -V \
-            | tail -n 1)
+            -type f -name "aapt2" | sort -V | tail -n 1)
 
           if [ -z "$AAPT2" ]; then
             echo "ERROR: aapt2 not found"
             exit 1
           fi
 
-          "$AAPT2" dump badging "$APK" | head -n 50
+          "$AAPT2" dump permissions "$APK" | tee apk-permissions.txt
 
-      # =========================
-      # 19. GitHub Release
-      # =========================
+          if ! grep -Fq 'android.permission.INTERNET' apk-permissions.txt; then
+            echo "ERROR: INTERNET permission missing"
+            exit 1
+          fi
+
+          echo "INTERNET permission OK"
+
+      # 19. Verify APK integrity
+      - name: Verify APK integrity
+        shell: bash
+        run: |
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+          unzip -t "$APK"
+          sha256sum "$APK"
+
+      # 20. Verify APK signature
+      - name: Verify APK signature
+        shell: bash
+        run: |
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" \
+            -type f -name "apksigner" | sort -V | tail -n 1)
+
+          if [ -z "$APKSIGNER" ]; then
+            echo "ERROR: apksigner not found"
+            exit 1
+          fi
+
+          "$APKSIGNER" verify --verbose "$APK"
+
+      # 21. Inspect APK
+      - name: Inspect APK
+        shell: bash
+        run: |
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+
+          AAPT2=$(find "$ANDROID_HOME/build-tools" \
+            -type f -name "aapt2" | sort -V | tail -n 1)
+
+          "$AAPT2" dump badging "$APK"
+
+      # 22. Upload APK
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: YAAS-Android-arm64
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      # 23. Create GitHub Release
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -266,22 +237,8 @@ jobs:
           name: YAAS Android Release ${{ github.run_number }}
           body: |
             YAAS Android Release
-
-            Commit:
-            ${{ github.sha }}
-
-            Flutter:
-            stable
-
-            Build:
-            Release APK
-
-            Target:
-            Android ARM64
-
-            Release Lint disabled because
-            video_player_android currently crashes
-            Android Lint during release analysis.
+            Target: Android
+            Build: Release APK
           files: |
             build/app/outputs/flutter-apk/app-release.apk
           prerelease: true
