@@ -1,3 +1,4 @@
+
 use std::{collections::HashMap, fmt, fs, path::Path};
 
 use anyhow::{Context, Result, ensure};
@@ -32,11 +33,6 @@ pub(crate) enum Backend {
 pub(crate) struct FfaConfig {
     pub rclone_path: RclonePath,
     pub rclone_config_path: String,
-
-    // Пароль шифрования файла rclone.conf.
-    // Необязательный: старые конфиги продолжат работать.
-    #[serde(default)]
-    pub rclone_config_password: Option<String>,
 
     #[serde(default)]
     pub remote_name_filter_regex: Option<String>,
@@ -243,7 +239,6 @@ impl Default for FfaConfig {
                 RclonePath::Single("/bin/echo".to_string()),
             rclone_config_path:
                 "/tmp/rclone.conf".to_string(),
-            rclone_config_password: None,
             remote_name_filter_regex: None,
             disable_randomize_remote: false,
             donation_remote_name: None,
@@ -413,8 +408,6 @@ mod tests {
             ffa.rclone_config_path,
             "/tmp/rclone.conf"
         );
-
-        assert_eq!(ffa.rclone_config_password, None);
 
         assert!(!ffa.disable_randomize_remote);
 
