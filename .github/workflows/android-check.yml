@@ -1,4 +1,4 @@
-name: Android APK
+name: YAAS Android APK
 
 on:
   workflow_dispatch:
@@ -14,32 +14,57 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # =========================
+      # 1. YAAS
+      # =========================
       - name: Checkout YAAS
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
+      # =========================
+      # 2. Java
+      # =========================
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
+      # =========================
+      # 3. Rust
+      # =========================
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # =========================
+      # 4. Rinf
+      # =========================
       - name: Install Rinf CLI
         run: cargo install rinf_cli --locked
 
+      # =========================
+      # 5. Flutter
+      # =========================
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
 
+      # =========================
+      # 6. Android project
+      # =========================
       - name: Generate Android project
-        run: flutter create --platforms=android --org com.yaas .
+        run: |
+          flutter create \
+            --platforms=android \
+            --org com.yaas \
+            .
 
+      # =========================
+      # 7. Android SDK
+      # =========================
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
         with:
@@ -50,82 +75,160 @@ jobs:
       - name: Accept Android SDK licenses
         run: yes | sdkmanager --licenses
 
+      # =========================
+      # 8. Android NDK
+      # =========================
       - name: Install Android NDK
-        run: sdkmanager "ndk;28.2.13676358"
+        run: |
+          sdkmanager "ndk;28.2.13676358"
 
-      - name: Get dependencies
-        run: flutter pub get
+      # =========================
+      # 9. Flutter dependencies
+      # =========================
+      - name: Get Flutter dependencies
+        run: |
+          flutter pub get
 
+      # =========================
+      # 10. Generate Rinf bindings
+      # =========================
       - name: Generate Rinf bindings
-        run: rinf gen
+        run: |
+          rinf gen
 
-      - name: Check generated files
+      # =========================
+      # 11. Check bindings
+      # =========================
+      - name: Check generated bindings
         run: |
           echo "Checking Rinf bindings..."
+
           test -s lib/src/bindings/bindings.dart
           test -s lib/src/bindings/signals/signals.dart
+
           echo "Rinf bindings OK"
 
-      - name: Build ARM64 APK
-        run: flutter build apk --debug --split-per-abi
-
-      - name: Check APK
+      # =========================
+      # 12. Flutter doctor
+      # =========================
+      - name: Flutter doctor
         run: |
-          APK="build/app/outputs/flutter-apk/app-arm64-v8a-debug.apk"
+          flutter doctor -v
 
-          echo "===== APK FILE ====="
+      # =========================
+      # 13. Build RELEASE APK
+      # =========================
+      - name: Build Android Release APK
+        run: |
+          flutter clean
+          flutter pub get
+          rinf gen
+
+          flutter build apk --release
+
+      # =========================
+      # 14. Find APK
+      # =========================
+      - name: Check APK
+        shell: bash
+        run: |
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+
+          if [ ! -f "$APK" ]; then
+            echo "ERROR: APK not found"
+            find build -type f -name "*.apk" -print
+            exit 1
+          fi
+
+          echo "=============================="
+          echo "APK FOUND"
+          echo "=============================="
+
           ls -lh "$APK"
 
-          echo "===== FILE TYPE ====="
+          echo
+          echo "FILE:"
           file "$APK"
 
-          echo "===== APK CONTENT ====="
-          unzip -t "$APK"
-
-          echo "===== APK SHA256 ====="
+          echo
+          echo "SHA256:"
           sha256sum "$APK"
 
-          echo "===== APK SIGNATURE ====="
-          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n 1)
+          echo
+          echo "ZIP TEST:"
+          unzip -t "$APK"
 
-          if [ -n "$APKSIGNER" ]; then
-            "$APKSIGNER" verify --verbose "$APK"
-          else
-            echo "apksigner not found"
+      # =========================
+      # 15. Verify APK signature
+      # =========================
+      - name: Verify APK signature
+        shell: bash
+        run: |
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" \
+            -type f \
+            -name "apksigner" \
+            | sort -V \
+            | tail -n 1)
+
+          if [ -z "$APKSIGNER" ]; then
+            echo "ERROR: apksigner not found"
             exit 1
           fi
 
-          echo "===== APK BADGING ====="
-          AAPT2=$(find "$ANDROID_HOME/build-tools" -name aapt2 | sort -V | tail -n 1)
+          echo "Using:"
+          echo "$APKSIGNER"
 
-          if [ -n "$AAPT2" ]; then
-            "$AAPT2" dump badging "$APK" | head -n 30
-          else
-            echo "aapt2 not found"
+          echo
+          echo "APK SIGNATURE:"
+          "$APKSIGNER" verify --verbose "$APK"
+
+      # =========================
+      # 16. APK information
+      # =========================
+      - name: Check APK package
+        shell: bash
+        run: |
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+
+          AAPT2=$(find "$ANDROID_HOME/build-tools" \
+            -type f \
+            -name "aapt2" \
+            | sort -V \
+            | tail -n 1)
+
+          if [ -z "$AAPT2" ]; then
+            echo "ERROR: aapt2 not found"
             exit 1
           fi
 
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: yaas-android-arm64-debug
-          path: build/app/outputs/flutter-apk/app-arm64-v8a-debug.apk
-          if-no-files-found: error
+          echo "APK BADGING:"
+          "$AAPT2" dump badging "$APK" | head -n 40
 
+      # =========================
+      # 17. Create GitHub Release
+      # =========================
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: android-arm64-${{ github.run_number }}
-          name: YAAS Android ARM64 Build ${{ github.run_number }}
+          tag_name: android-release-${{ github.run_number }}
+          name: YAAS Android Release ${{ github.run_number }}
           body: |
-            YAAS Android ARM64 debug build.
+            YAAS Android ARM64 Release
 
-            Commit: ${{ github.sha }}
+            Commit:
+            ${{ github.sha }}
 
-            Target architecture:
-            arm64-v8a
+            Build:
+            Flutter Release APK
 
-            This build does not include the experimental bundled rclone.
-          files: build/app/outputs/flutter-apk/app-arm64-v8a-debug.apk
+            Architecture:
+            ARM64 / arm64-v8a
+
+            This release is the clean Android build
+            without the experimental bundled rclone.
+          files: |
+            build/app/outputs/flutter-apk/app-release.apk
           prerelease: true
           make_latest: false
