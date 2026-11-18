@@ -1,3 +1,4 @@
+
 use std::path::Path;
 
 use anyhow::Result;
@@ -47,11 +48,13 @@ impl Repo {
         cfg: &DownloaderConfig,
         cache_dir: &Path,
         settings: &Settings,
+        config_password: Option<String>,
         cancel: &CancellationToken,
     ) -> Result<(Self, Option<String>)> {
         match &cfg.backend {
             Backend::Ffa(ffa) => {
-                let (repo, remote) = FFARepo::new(ffa, cache_dir, settings, cancel).await?;
+                let (repo, remote) =
+                    FFARepo::new(ffa, cache_dir, settings, config_password, cancel).await?;
                 Ok((Self::Ffa(Box::new(repo)), remote))
             }
             Backend::NewRepo(repo) => {
