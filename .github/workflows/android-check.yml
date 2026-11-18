@@ -41,11 +41,12 @@ jobs:
       - name: Generate Android project
         run: flutter create --platforms=android --org com.yaas .
 
-      - name: Setup Android SDK and NDK
+      - name: Setup Android SDK
         uses: android-actions/setup-android@v3
-
-      - name: Accept Android SDK licenses
-        run: yes | sdkmanager --licenses
+        with:
+          packages: platform-tools
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: true
 
       - name: Install Android NDK
         run: sdkmanager "ndk;28.2.13676358"
@@ -141,9 +142,14 @@ jobs:
 
           test -s "$APK"
 
+          echo "APK information:"
           ls -lh "$APK"
           file "$APK"
+
+          echo "APK SHA256:"
           sha256sum "$APK"
+
+          echo "APK integrity:"
           unzip -t "$APK"
 
       - name: Create GitHub Release
@@ -155,7 +161,9 @@ jobs:
             YAAS Android ARM64 debug build.
 
             Commit: ${{ github.sha }}
-            Target architecture: arm64-v8a
+
+            Target architecture:
+            arm64-v8a
           files: build/app/outputs/flutter-apk/app-arm64-v8a-debug.apk
           prerelease: true
           make_latest: false
