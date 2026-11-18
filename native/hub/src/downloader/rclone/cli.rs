@@ -1,3 +1,4 @@
+
 use std::{
     error::Error,
     path::{Path, PathBuf},
@@ -15,7 +16,7 @@ use tokio::{
     time::{self, Instant, MissedTickBehavior},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{Span, error, instrument, trace, warn};
+use tracing::{Span, error, instrument, warn};
 
 use crate::{
     downloader::{TransferSpeedTracker, TransferStats},
@@ -52,18 +53,7 @@ pub(super) struct RcloneSizeOutput {
 #[serde(rename_all = "camelCase")]
 struct RcloneTransferStats {
     bytes: u64,
-    // total_bytes: u64,
-    // #[serde(deserialize_with = "deserialize_speed")]
-    // speed: u64,
 }
-
-// fn deserialize_speed<'de, D>(deserializer: D) -> Result<u64, D::Error>
-// where
-//     D: serde::Deserializer<'de>,
-// {
-//     let speed = f64::deserialize(deserializer)?;
-//     Ok(speed as u64)
-// }
 
 #[derive(Debug, Clone, Deserialize)]
 struct RcloneJsonLogLine {
@@ -97,13 +87,18 @@ impl RcloneProgressTracker {
     }
 
     fn record_stats(&mut self, stats: RcloneTransferStats) -> TransferStats {
-        let speed = self.speed_tracker.record(stats.bytes, self.started_at.elapsed().as_millis());
+        let speed = self.speed_tracker.record(
+            stats.bytes,
+            self.started_at.elapsed().as_millis(),
+        );
+
         let normalized = TransferStats {
             bytes: stats.bytes,
             total_bytes: (stats.bytes <= self.expected_total_bytes)
                 .then_some(self.expected_total_bytes),
             speed,
         };
+
         self.last_update_at = Some(Instant::now());
         self.last_stats = Some(normalized.clone());
         normalized
@@ -111,37 +106,50 @@ impl RcloneProgressTracker {
 
     fn maybe_stale_stats(&mut self, now: Instant) -> Option<TransferStats> {
         let last_update_at = self.last_update_at?;
+
         if now.duration_since(last_update_at) < RCLONE_STALE_SPEED_TIMEOUT {
             return None;
         }
 
         let last_stats = self.last_stats.as_mut()?;
+
         if last_stats.speed == 0 {
             return None;
         }
 
         last_stats.speed = 0;
         self.last_update_at = Some(now);
+
         Some(last_stats.clone())
     }
 }
 
 impl RcloneJsonLogLine {
-    /// Converts to human-readable format like "2025/12/03 16:25:39 ERROR : object: message"
     fn to_human_readable(&self) -> String {
         let formatted_time = self.format_time();
         let level_upper = self.level.to_uppercase();
+
         match &self.object {
             Some(obj) => {
-                format!("{} {} : {}: {}", formatted_time, level_upper, obj, self.msg.trim())
+                format!(
+                    "{} {} : {}: {}",
+                    formatted_time,
+                    level_upper,
+                    obj,
+                    self.msg.trim()
+                )
             }
-            None => format!("{} {} : {}", formatted_time, level_upper, self.msg.trim()),
+            None => {
+                format!(
+                    "{} {} : {}",
+                    formatted_time,
+                    level_upper,
+                    self.msg.trim()
+                )
+            }
         }
     }
 
-    /// Formats ISO timestamp to rclone's default format.
-    /// Input: "2025-12-03T16:18:24.677508041+03:00"
-    /// Output: "2025/12/03 16:18:24"
     fn format_time(&self) -> String {
         if let Some(t_pos) = self.time.find('T') {
             let date_part = &self.time[..t_pos];
@@ -149,6 +157,7 @@ impl RcloneJsonLogLine {
             let time_end = (time_start + 8).min(self.time.len());
             let time_part = &self.time[time_start..time_end];
             let formatted_date = date_part.replace('-', "/");
+
             format!("{} {}", formatted_date, time_part)
         } else {
             self.time.clone()
@@ -171,20 +180,32 @@ impl RcloneTransferOperation {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(super) struct RcloneCli {
     rclone_path: PathBuf,
     config_path: PathBuf,
     sys_proxy: Option<String>,
     bandwidth_limit: String,
+
+    // Пароль шифрования rclone.conf.
+    // Не выводится в Debug и не передаётся в аргументах командной строки.
+    config_password: Option<String>,
 }
 
 impl RcloneCli {
-    #[instrument(level = "debug", fields(sys_proxy), ret)]
-    pub(super) fn new(rclone_path: PathBuf, config_path: PathBuf, bandwidth_limit: String) -> Self {
+    #[instrument(level = "debug", fields(sys_proxy))]
+    pub(super) fn new(
+        rclone_path: PathBuf,
+        config_path: PathBuf,
+        bandwidth_limit: String,
+    ) -> Self {
         let sys_proxy = get_sys_proxy();
+
         let resolved_path =
-            match resolve_binary_path(Some(&rclone_path.to_string_lossy()), "rclone") {
+            match resolve_binary_path(
+                Some(&rclone_path.to_string_lossy()),
+                "rclone",
+            ) {
                 Ok(p) => p,
                 Err(e) => {
                     warn!(
@@ -192,11 +213,28 @@ impl RcloneCli {
                         original = %rclone_path.display(),
                         "Failed to resolve rclone path, using provided value"
                     );
+
                     rclone_path
                 }
             };
+
         Span::current().record("sys_proxy", sys_proxy.as_deref());
-        Self { rclone_path: resolved_path, config_path, sys_proxy, bandwidth_limit }
+
+        Self {
+            rclone_path: resolved_path,
+            config_path,
+            sys_proxy,
+            bandwidth_limit,
+            config_password: None,
+        }
+    }
+
+    pub(super) fn set_config_password(
+        &mut self,
+        password: Option<String>,
+    ) {
+        self.config_password =
+            password.filter(|p| !p.is_empty());
     }
 
     pub(super) fn set_bandwidth_limit(&mut self, limit: String) {
@@ -206,44 +244,74 @@ impl RcloneCli {
     #[instrument(skip(self), level = "debug")]
     fn command(&self, args: &[&str], use_json_log: bool) -> Command {
         let mut command = Command::new(&self.rclone_path);
+
         command.kill_on_drop(true);
-        // Avoid hangs on unexpected input prompts
+
+        // Не позволяем rclone зависать на интерактивном запросе.
         command.stdin(Stdio::null());
 
-        // Hide the console window on Windows
         #[cfg(target_os = "windows")]
-        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        command.creation_flags(0x08000000);
 
         if let Some(proxy) = &self.sys_proxy {
-            trace!(proxy, "Using system proxy");
             command.env("http_proxy", proxy);
             command.env("https_proxy", proxy);
         }
 
+        // Передаём пароль конфигурации через переменную окружения.
+        // Пароль не попадает в аргументы командной строки.
+        if let Some(password) = &self.config_password {
+            command.env("RCLONE_CONFIG_PASS", password);
+        }
+
         command.arg("--config").arg(&self.config_path);
+
         if use_json_log {
             command.arg("--use-json-log");
         }
 
-        command.args(["--contimeout", CONNECTION_TIMEOUT, "--timeout", IO_IDLE_TIMEOUT]);
+        command.args([
+            "--ask-password=false",
+            "--contimeout",
+            CONNECTION_TIMEOUT,
+            "--timeout",
+            IO_IDLE_TIMEOUT,
+        ]);
+
         command.args(args);
-        trace!(command = ?command, "Constructed rclone command");
+
         command
     }
 
     #[instrument(skip(self), level = "debug")]
     async fn run_to_string(&self, args: &[&str]) -> Result<String> {
-        let output = self.command(args, false).output().await.context("Rclone command failed")?;
+        let output = self
+            .command(args, false)
+            .output()
+            .await
+            .context("Rclone command failed")?;
+
         if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            trace!(stdout, "Rclone command successful");
+            let stdout =
+                String::from_utf8_lossy(&output.stdout).to_string();
+
             Ok(stdout)
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            error!(code = output.status.code().unwrap_or(-1), stderr, "Rclone command failed");
+            let stderr =
+                String::from_utf8_lossy(&output.stderr).to_string();
+
+            error!(
+                code = output.status.code().unwrap_or(-1),
+                stderr,
+                "Rclone command failed"
+            );
+
             bail!(
                 "Rclone returned exit code {}, stderr:\n{}",
-                output.status.code().map_or("unknown".to_string(), |c| c.to_string()),
+                output.status.code().map_or(
+                    "unknown".to_string(),
+                    |c| c.to_string()
+                ),
                 stderr
             )
         }
@@ -251,16 +319,39 @@ impl RcloneCli {
 
     #[instrument(skip(self), level = "debug")]
     pub(super) async fn remotes(&self) -> Result<Vec<String>> {
-        let output = self.run_to_string(&["listremotes"]).await?;
-        Ok(output.lines().map(|line| line.trim().trim_end_matches(':').to_string()).collect())
+        let output =
+            self.run_to_string(&["listremotes"]).await?;
+
+        Ok(
+            output
+                .lines()
+                .map(|line| {
+                    line.trim()
+                        .trim_end_matches(':')
+                        .to_string()
+                })
+                .collect()
+        )
     }
 
-    #[instrument(level = "debug", skip(self), ret, err)]
-    pub(super) async fn size(&self, path: &str) -> Result<RcloneSizeOutput> {
-        // TODO: can `--check-first` be used to make `total_bytes` reliable instead?
-        let output = self.run_to_string(&["size", "--fast-list", "--json", path]).await?;
+    #[instrument(level = "debug", skip(self))]
+    pub(super) async fn size(
+        &self,
+        path: &str,
+    ) -> Result<RcloneSizeOutput> {
+        let output = self
+            .run_to_string(&[
+                "size",
+                "--fast-list",
+                "--json",
+                path,
+            ])
+            .await?;
+
         let size_output: RcloneSizeOutput =
-            serde_json::from_str(&output).context("Failed to parse rclone size output")?;
+            serde_json::from_str(&output)
+                .context("Failed to parse rclone size output")?;
+
         Ok(size_output)
     }
 
@@ -272,7 +363,15 @@ impl RcloneCli {
         operation: RcloneTransferOperation,
         cancellation_token: Option<CancellationToken>,
     ) -> Result<()> {
-        self.transfer_internal(source, dest, operation, None, None, cancellation_token).await
+        self.transfer_internal(
+            source,
+            dest,
+            operation,
+            None,
+            None,
+            cancellation_token,
+        )
+        .await
     }
 
     #[instrument(level = "debug", skip(self, stats_tx, cancellation_token))]
@@ -325,14 +424,29 @@ impl RcloneCli {
         ];
 
         if !self.bandwidth_limit.is_empty() {
-            args.extend_from_slice(&["--bwlimit", &self.bandwidth_limit]);
+            args.extend_from_slice(&[
+                "--bwlimit",
+                &self.bandwidth_limit,
+            ]);
         }
 
         args.extend_from_slice(&[&source, &dest]);
 
         let use_json_log = stats_tx.is_some();
-        let child = self.command(&args, use_json_log).stderr(Stdio::piped()).spawn()?;
-        finish_transfer(child, total_bytes, stats_tx, cancellation_token, use_json_log).await
+
+        let child = self
+            .command(&args, use_json_log)
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        finish_transfer(
+            child,
+            total_bytes,
+            stats_tx,
+            cancellation_token,
+            use_json_log,
+        )
+        .await
     }
 }
 
@@ -343,34 +457,50 @@ async fn finish_transfer(
     cancellation_token: Option<CancellationToken>,
     use_json_log: bool,
 ) -> Result<()> {
-    let stderr = child.stderr.take().context("Failed to get stderr")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("Failed to get stderr")?;
+
     let mut lines = BufReader::new(stderr).lines();
 
     let transfer_future = async {
-        // Collect non-stat lines for error reporting
         let mut stderr_lines: Vec<String> = Vec::new();
 
         let mut stats_tx = stats_tx;
-        let mut progress_tracker = total_bytes.map(RcloneProgressTracker::new);
-        let mut stale_tick = time::interval(RCLONE_STATS_INTERVAL);
-        stale_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut progress_tracker =
+            total_bytes.map(RcloneProgressTracker::new);
+
+        let mut stale_tick =
+            time::interval(RCLONE_STATS_INTERVAL);
+
+        stale_tick.set_missed_tick_behavior(
+            MissedTickBehavior::Delay
+        );
+
         stale_tick.tick().await;
 
         loop {
             tokio::select! {
                 line = lines.next_line() => {
-                    let Some(line) = line? else { break };
+                    let Some(line) = line? else {
+                        break;
+                    };
+
                     if use_json_log {
                         match serde_json::from_str::<RcloneJsonLogLine>(&line) {
                             Ok(log_line) => {
                                 if let Some(stats) = log_line.stats {
-                                    if let (Some(tx), Some(tracker)) = (&stats_tx, &mut progress_tracker)
+                                    if let (Some(tx), Some(tracker)) =
+                                        (&stats_tx, &mut progress_tracker)
                                         && tx.send(tracker.record_stats(stats)).is_err()
                                     {
                                         stats_tx = None;
                                     }
                                 } else {
-                                    stderr_lines.push(log_line.to_human_readable());
+                                    stderr_lines.push(
+                                        log_line.to_human_readable()
+                                    );
                                 }
                             }
                             Err(_) => stderr_lines.push(line),
@@ -379,9 +509,12 @@ async fn finish_transfer(
                         stderr_lines.push(line);
                     }
                 }
+
                 _ = stale_tick.tick(), if stats_tx.is_some() => {
-                    if let (Some(tx), Some(tracker)) = (&stats_tx, &mut progress_tracker)
-                        && let Some(stats) = tracker.maybe_stale_stats(Instant::now())
+                    if let (Some(tx), Some(tracker)) =
+                        (&stats_tx, &mut progress_tracker)
+                        && let Some(stats) =
+                            tracker.maybe_stale_stats(Instant::now())
                         && tx.send(stats).is_err()
                     {
                         stats_tx = None;
@@ -391,14 +524,24 @@ async fn finish_transfer(
         }
 
         let status = child.wait().await?;
+
         match status.success() {
             true => Ok(()),
             false => {
                 let stderr_str = stderr_lines.join("\n");
-                error!(code = status.code().unwrap_or(-1), stderr = %stderr_str, "Rclone transfer failed");
+
+                error!(
+                    code = status.code().unwrap_or(-1),
+                    stderr = %stderr_str,
+                    "Rclone transfer failed"
+                );
+
                 Err(anyhow!(
                     "Rclone failed with exit code: {}, stderr: {}",
-                    status.code().map_or("unknown".to_string(), |c| c.to_string()),
+                    status.code().map_or(
+                        "unknown".to_string(),
+                        |c| c.to_string()
+                    ),
                     stderr_str
                 ))
             }
@@ -409,8 +552,11 @@ async fn finish_transfer(
         tokio::select! {
             res = transfer_future => res,
             _ = token.cancelled() => {
-                warn!("Rclone transfer cancelled by token");
-                child.kill().await.context("Failed to kill rclone process")?;
+                child
+                    .kill()
+                    .await
+                    .context("Failed to kill rclone process")?;
+
                 Err(anyhow!("Download cancelled"))
             }
         }
@@ -419,16 +565,25 @@ async fn finish_transfer(
     }
 }
 
-fn filter_remotes_with_regex(remotes: Vec<String>, pattern: Option<&str>) -> Vec<String> {
+fn filter_remotes_with_regex(
+    remotes: Vec<String>,
+    pattern: Option<&str>,
+) -> Vec<String> {
     if let Some(pat) = pattern {
         match Regex::new(pat) {
-            Ok(re) => remotes.into_iter().filter(|r| re.is_match(r)).collect(),
+            Ok(re) => {
+                remotes
+                    .into_iter()
+                    .filter(|r| re.is_match(r))
+                    .collect()
+            }
             Err(e) => {
                 warn!(
                     pattern = %pat,
                     error = &e as &dyn Error,
                     "Invalid remote filter regex, returning unfiltered remotes"
                 );
+
                 remotes
             }
         }
@@ -443,9 +598,18 @@ pub(crate) async fn list_remotes(
     config_path: &Path,
     remote_filter_regex: Option<&str>,
 ) -> Result<Vec<String>> {
-    let cli = RcloneCli::new(rclone_path.to_path_buf(), config_path.to_path_buf(), String::new());
+    let cli = RcloneCli::new(
+        rclone_path.to_path_buf(),
+        config_path.to_path_buf(),
+        String::new(),
+    );
+
     let remotes = cli.remotes().await?;
-    Ok(filter_remotes_with_regex(remotes, remote_filter_regex))
+
+    Ok(filter_remotes_with_regex(
+        remotes,
+        remote_filter_regex,
+    ))
 }
 
 #[cfg(test)]
@@ -453,14 +617,21 @@ mod tests {
     use super::*;
 
     fn test_child(mode: &str) -> tokio::process::Child {
-        let mut command = Command::new(std::env::current_exe().unwrap());
+        let mut command =
+            Command::new(std::env::current_exe().unwrap());
+
         command
-            .args(["--exact", "downloader::rclone::cli::tests::stderr_child", "--nocapture"])
+            .args([
+                "--exact",
+                "downloader::rclone::cli::tests::stderr_child",
+                "--nocapture",
+            ])
             .env("YAAS_RCLONE_TEST_CHILD", mode)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+
         command.spawn().unwrap()
     }
 
@@ -469,23 +640,40 @@ mod tests {
         let Ok(mode) = std::env::var("YAAS_RCLONE_TEST_CHILD") else {
             return;
         };
+
         use std::io::Write;
+
         let mut stderr = std::io::stderr().lock();
+
         if mode == "progress" || mode == "cancel" {
-            writeln!(stderr, r#"{{"level":"notice","msg":"stats","time":"2026-01-01T00:00:00Z","stats":{{"bytes":1}}}}"#).unwrap();
+            writeln!(
+                stderr,
+                r#"{{"level":"notice","msg":"stats","time":"2026-01-01T00:00:00Z","stats":{{"bytes":1}}}}"#
+            ).unwrap();
+
             stderr.flush().unwrap();
         }
+
         for _ in 0..20_000 {
-            writeln!(stderr, "diagnostic {}", "x".repeat(128)).unwrap();
+            writeln!(
+                stderr,
+                "diagnostic {}",
+                "x".repeat(128)
+            ).unwrap();
         }
+
         writeln!(stderr, "last diagnostic").unwrap();
         stderr.flush().unwrap();
+
         if mode == "cancel" {
             loop {
                 std::thread::park();
             }
         }
-        std::process::exit(if mode == "failure" { 7 } else { 0 });
+
+        std::process::exit(
+            if mode == "failure" { 7 } else { 0 }
+        );
     }
 
     #[tokio::test]
@@ -493,14 +681,22 @@ mod tests {
         for mode in ["success", "failure"] {
             let result = tokio::time::timeout(
                 Duration::from_secs(10),
-                finish_transfer(test_child(mode), None, None, None, false),
+                finish_transfer(
+                    test_child(mode),
+                    None,
+                    None,
+                    None,
+                    false,
+                ),
             )
             .await
             .expect("stderr pipe deadlocked");
+
             if mode == "success" {
                 result.unwrap();
             } else {
                 let error = result.unwrap_err().to_string();
+
                 assert!(error.contains("7"));
                 assert!(error.contains("last diagnostic"));
             }
@@ -509,11 +705,20 @@ mod tests {
 
     #[tokio::test]
     async fn drains_stderr_after_progress_receiver_closes() {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) =
+            tokio::sync::mpsc::unbounded_channel();
+
         drop(rx);
+
         tokio::time::timeout(
             Duration::from_secs(10),
-            finish_transfer(test_child("progress"), Some(100), Some(tx), None, true),
+            finish_transfer(
+                test_child("progress"),
+                Some(100),
+                Some(tx),
+                None,
+                true,
+            ),
         )
         .await
         .expect("stderr pipe deadlocked")
@@ -523,152 +728,11 @@ mod tests {
     #[tokio::test]
     async fn cancellation_kills_and_reaps_transfer() {
         let token = CancellationToken::new();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let (tx, mut rx) =
+            tokio::sync::mpsc::unbounded_channel();
+
         let task = tokio::spawn(finish_transfer(
             test_child("cancel"),
             Some(100),
-            Some(tx),
-            Some(token.clone()),
-            true,
-        ));
-        tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.unwrap().unwrap();
-        token.cancel();
-        let error =
-            tokio::time::timeout(Duration::from_secs(5), task).await.unwrap().unwrap().unwrap_err();
-        assert!(error.to_string().contains("cancelled"));
-    }
-
-    #[test]
-    fn progress_tracker_derives_speed_from_bytes() {
-        let mut tracker = RcloneProgressTracker::new(100);
-
-        let first = tracker.record_stats(RcloneTransferStats { bytes: 25 });
-        std::thread::sleep(Duration::from_millis(20));
-        let second = tracker.record_stats(RcloneTransferStats { bytes: 25 });
-
-        assert_eq!(first.total_bytes, Some(100));
-        assert!(second.speed <= first.speed);
-    }
-
-    #[test]
-    fn progress_tracker_marks_progress_unknown_when_bytes_exceed_expected_total() {
-        let mut tracker = RcloneProgressTracker::new(100);
-
-        let stats = tracker.record_stats(RcloneTransferStats { bytes: 120 });
-
-        assert_eq!(stats.total_bytes, None);
-    }
-
-    #[test]
-    fn progress_tracker_emits_zero_speed_after_stall() {
-        let mut tracker = RcloneProgressTracker::new(100);
-        std::thread::sleep(Duration::from_millis(20));
-        let recorded = tracker.record_stats(RcloneTransferStats { bytes: 50 });
-        assert!(recorded.speed > 0);
-        tracker.last_update_at = Some(Instant::now() - RCLONE_STALE_SPEED_TIMEOUT);
-
-        let stats = tracker.maybe_stale_stats(Instant::now()).expect("stale stats");
-
-        assert_eq!(stats.speed, 0);
-        assert_eq!(stats.bytes, 50);
-    }
-
-    #[test]
-    fn parse_json_log_line_with_object() {
-        let json = r#"{"time":"2025-12-03T16:18:24.49104384+03:00","level":"error","msg":"error reading source root directory: directory not found","object":"webdav root 'Quest Games/A Fishermans Tale v16+1.064 -QU'","objectType":"*webdav.Fs","source":"slog/logger.go:256"}"#;
-        let parsed: RcloneJsonLogLine = serde_json::from_str(json).unwrap();
-
-        assert_eq!(parsed.level, "error");
-        assert_eq!(parsed.msg, "error reading source root directory: directory not found");
-        assert_eq!(
-            parsed.object,
-            Some("webdav root 'Quest Games/A Fishermans Tale v16+1.064 -QU'".to_string())
-        );
-        assert!(parsed.stats.is_none());
-    }
-
-    #[test]
-    fn parse_json_log_line_without_object() {
-        let json = r#"{"time":"2025-12-03T16:18:24.491141917+03:00","level":"error","msg":"Attempt 1/3 failed with 1 errors and: directory not found","source":"slog/logger.go:256"}"#;
-        let parsed: RcloneJsonLogLine = serde_json::from_str(json).unwrap();
-
-        assert_eq!(parsed.level, "error");
-        assert_eq!(parsed.msg, "Attempt 1/3 failed with 1 errors and: directory not found");
-        assert!(parsed.object.is_none());
-        assert!(parsed.stats.is_none());
-    }
-
-    #[test]
-    fn parse_json_log_line_with_stats() {
-        let json = r#"{"time":"2025-12-03T16:36:50.513851561+03:00","level":"info","msg":"\nTransferred: ...","stats":{"bytes":39841792,"checks":0,"deletedDirs":0,"deletes":0,"elapsedTime":2.000537856,"errors":0,"eta":3,"fatalError":false,"listed":1,"renames":0,"retryError":false,"serverSideCopies":0,"serverSideCopyBytes":0,"serverSideMoveBytes":0,"serverSideMoves":0,"speed":19920887.154321734,"totalBytes":107369499,"totalChecks":0,"totalTransfers":1,"transferTime":1.907390027,"transfers":0},"source":"slog/logger.go:256"}"#;
-        let parsed: RcloneJsonLogLine = serde_json::from_str(json).unwrap();
-
-        assert_eq!(parsed.level, "info");
-        assert!(parsed.stats.is_some());
-
-        let stats = parsed.stats.unwrap();
-        assert_eq!(stats.bytes, 39841792);
-    }
-
-    #[test]
-    fn to_human_readable_with_object() {
-        let log_line = RcloneJsonLogLine {
-            time: "2025-12-03T16:18:24.49104384+03:00".to_string(),
-            level: "error".to_string(),
-            msg: "error reading source root directory: directory not found".to_string(),
-            object: Some("webdav root 'Quest Games/Test'".to_string()),
-            stats: None,
-        };
-
-        let human = log_line.to_human_readable();
-        assert_eq!(
-            human,
-            "2025/12/03 16:18:24 ERROR : webdav root 'Quest Games/Test': error reading source \
-             root directory: directory not found"
-        );
-    }
-
-    #[test]
-    fn to_human_readable_without_object() {
-        let log_line = RcloneJsonLogLine {
-            time: "2025-12-03T16:18:24.491141917+03:00".to_string(),
-            level: "error".to_string(),
-            msg: "Attempt 1/3 failed with 1 errors and: directory not found".to_string(),
-            object: None,
-            stats: None,
-        };
-
-        let human = log_line.to_human_readable();
-        assert_eq!(
-            human,
-            "2025/12/03 16:18:24 ERROR : Attempt 1/3 failed with 1 errors and: directory not found"
-        );
-    }
-
-    #[test]
-    fn to_human_readable_notice_level() {
-        let log_line = RcloneJsonLogLine {
-            time: "2025-12-03T16:18:24.677564739+03:00".to_string(),
-            level: "notice".to_string(),
-            msg: "Failed to sync: directory not found".to_string(),
-            object: None,
-            stats: None,
-        };
-
-        let human = log_line.to_human_readable();
-        assert_eq!(human, "2025/12/03 16:18:24 NOTICE : Failed to sync: directory not found");
-    }
-
-    #[test]
-    fn format_time_iso_to_rclone() {
-        let log_line = RcloneJsonLogLine {
-            time: "2025-12-03T16:18:24.677508041+03:00".to_string(),
-            level: "info".to_string(),
-            msg: "test".to_string(),
-            object: None,
-            stats: None,
-        };
-
-        assert_eq!(log_line.format_time(), "2025/12/03 16:18:24");
-    }
-}
+         
