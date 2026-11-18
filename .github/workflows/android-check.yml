@@ -38,6 +38,12 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Setup Go for rclone
+        uses: actions/setup-go@v7
+        with:
+          go-version: "~1.27.0"
+          cache: true
+
       - name: Generate Android project
         run: |
           flutter create \
@@ -58,7 +64,46 @@ jobs:
       - name: Install Android NDK
         run: sdkmanager "ndk;28.2.13676358"
 
-      - name: Configure Android manifest and native libraries
+      - name: Build bundled Android rclone
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          RCLONE_VERSION="v1.76.0"
+          NDK="$ANDROID_HOME/ndk/28.2.13676358"
+          RCLONE_DIR="$RUNNER_TEMP/rclone"
+
+          DEST="$GITHUB_WORKSPACE/android/app/src/main/jniLibs/arm64-v8a/librclone.so"
+
+          git clone \
+            --depth 1 \
+            --branch "$RCLONE_VERSION" \
+            https://github.com/rclone/rclone.git \
+            "$RCLONE_DIR"
+
+          mkdir -p "$(dirname "$DEST")"
+
+          cd "$RCLONE_DIR"
+
+          export ANDROID_NDK="$NDK"
+          export CC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
+          export CC_FOR_TARGET="$CC"
+
+          export GOOS=android
+          export GOARCH=arm64
+          export CGO_ENABLED=1
+          export CGO_LDFLAGS="-fuse-ld=lld -s -w"
+
+          go build -v -tags android -trimpath \
+            -ldflags="-s -w -X github.com/rclone/rclone/fs.Version=$RCLONE_VERSION" \
+            -o "$DEST" .
+
+          chmod 755 "$DEST"
+
+          file "$DEST"
+          readelf -h "$DEST" | grep -E 'Class:|Machine:'
+
+      - name: Configure Android manifest
         shell: bash
         run: |
           set -euo pipefail
@@ -114,15 +159,13 @@ jobs:
             exit 1
           fi
 
-          echo "Android manifest:"
-          cat "$MANIFEST"
-
       - name: Get Flutter dependencies
         run: flutter pub get
 
       - name: Generate Rinf bindings
         run: |
           rinf gen
+
           test -s lib/src/bindings/bindings.dart
           test -s lib/src/bindings/signals/signals.dart
 
@@ -139,26 +182,34 @@ jobs:
 
           APK="build/app/outputs/flutter-apk/app-release.apk"
 
-          if [ ! -s "$APK" ]; then
-            echo "ERROR: Release APK was not created"
-            find build -type f -name "*.apk" -print
-            exit 1
-          fi
+          test -s "$APK"
 
           ls -lh "$APK"
 
-      - name: Verify native libraries
+      - name: Verify required native libraries and assets
         shell: bash
         run: |
           set -euo pipefail
 
           APK="build/app/outputs/flutter-apk/app-release.apk"
 
-          echo "Checking libhub.so..."
-          unzip -Z1 "$APK" | grep -E '(^|/)libhub\.so$'
+          CONTENTS="$(mktemp)"
+          unzip -Z1 "$APK" > "$CONTENTS"
 
-          echo "Checking Android native libraries..."
-          unzip -Z1 "$APK" | grep '^lib/arm64-v8a/'
+          echo "Checking native libraries..."
+
+          grep -Fx 'lib/arm64-v8a/libhub.so' "$CONTENTS"
+          grep -Fx 'lib/arm64-v8a/librclone.so' "$CONTENTS"
+          grep -Fx 'lib/arm64-v8a/libapp.so' "$CONTENTS"
+          grep -Fx 'lib/arm64-v8a/libflutter.so' "$CONTENTS"
+
+          echo "Checking Flutter assets..."
+
+          grep -q '^assets/flutter_assets/AssetManifest' "$CONTENTS"
+          grep -q '^assets/flutter_assets/assets/svg/' "$CONTENTS"
+          grep -q '^assets/flutter_assets/assets/png/' "$CONTENTS"
+
+          echo "All required files are present."
 
       - name: Verify Internet permission
         shell: bash
@@ -179,6 +230,7 @@ jobs:
       - name: Verify APK integrity
         run: |
           APK="build/app/outputs/flutter-apk/app-release.apk"
+
           unzip -t "$APK"
           sha256sum "$APK"
 
@@ -191,6 +243,7 @@ jobs:
             -type f -name "apksigner" | sort -V | tail -n 1)
 
           test -n "$APKSIGNER"
+
           "$APKSIGNER" verify --verbose "$APK"
 
       - name: Upload APK
@@ -210,6 +263,7 @@ jobs:
             YAAS Android Release
             Target: Android ARM64
             Build type: Release
+            Includes bundled Android rclone.
           files: |
             build/app/outputs/flutter-apk/app-release.apk
           prerelease: true
