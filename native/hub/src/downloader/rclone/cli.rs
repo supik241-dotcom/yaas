@@ -186,9 +186,6 @@ pub(super) struct RcloneCli {
     config_path: PathBuf,
     sys_proxy: Option<String>,
     bandwidth_limit: String,
-
-    // Пароль шифрования rclone.conf.
-    // Не выводится в Debug и не передаётся в аргументах командной строки.
     config_password: Option<String>,
 }
 
@@ -246,8 +243,6 @@ impl RcloneCli {
         let mut command = Command::new(&self.rclone_path);
 
         command.kill_on_drop(true);
-
-        // Не позволяем rclone зависать на интерактивном запросе.
         command.stdin(Stdio::null());
 
         #[cfg(target_os = "windows")]
@@ -258,8 +253,6 @@ impl RcloneCli {
             command.env("https_proxy", proxy);
         }
 
-        // Передаём пароль конфигурации через переменную окружения.
-        // Пароль не попадает в аргументы командной строки.
         if let Some(password) = &self.config_password {
             command.env("RCLONE_CONFIG_PASS", password);
         }
@@ -279,7 +272,6 @@ impl RcloneCli {
         ]);
 
         command.args(args);
-
         command
     }
 
@@ -292,10 +284,7 @@ impl RcloneCli {
             .context("Rclone command failed")?;
 
         if output.status.success() {
-            let stdout =
-                String::from_utf8_lossy(&output.stdout).to_string();
-
-            Ok(stdout)
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
         } else {
             let stderr =
                 String::from_utf8_lossy(&output.stderr).to_string();
@@ -592,17 +581,20 @@ fn filter_remotes_with_regex(
     }
 }
 
-#[instrument(level = "debug", ret, err)]
+#[instrument(level = "debug", skip(config_password), ret, err)]
 pub(crate) async fn list_remotes(
     rclone_path: &Path,
     config_path: &Path,
     remote_filter_regex: Option<&str>,
+    config_password: Option<String>,
 ) -> Result<Vec<String>> {
-    let cli = RcloneCli::new(
+    let mut cli = RcloneCli::new(
         rclone_path.to_path_buf(),
         config_path.to_path_buf(),
         String::new(),
     );
+
+    cli.set_config_password(config_password);
 
     let remotes = cli.remotes().await?;
 
@@ -735,4 +727,199 @@ mod tests {
         let task = tokio::spawn(finish_transfer(
             test_child("cancel"),
             Some(100),
-         
+            Some(tx),
+            Some(token.clone()),
+            true,
+        ));
+
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            rx.recv(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        token.cancel();
+
+        let error =
+            tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err();
+
+        assert!(error.to_string().contains("cancelled"));
+    }
+
+    #[test]
+    fn progress_tracker_derives_speed_from_bytes() {
+        let mut tracker = RcloneProgressTracker::new(100);
+
+        let first =
+            tracker.record_stats(RcloneTransferStats { bytes: 25 });
+
+        std::thread::sleep(Duration::from_millis(20));
+
+        let second =
+            tracker.record_stats(RcloneTransferStats { bytes: 25 });
+
+        assert_eq!(first.total_bytes, Some(100));
+        assert!(second.speed <= first.speed);
+    }
+
+    #[test]
+    fn progress_tracker_marks_progress_unknown_when_bytes_exceed_expected_total() {
+        let mut tracker = RcloneProgressTracker::new(100);
+
+        let stats =
+            tracker.record_stats(RcloneTransferStats { bytes: 120 });
+
+        assert_eq!(stats.total_bytes, None);
+    }
+
+    #[test]
+    fn progress_tracker_emits_zero_speed_after_stall() {
+        let mut tracker = RcloneProgressTracker::new(100);
+
+        std::thread::sleep(Duration::from_millis(20));
+
+        let recorded =
+            tracker.record_stats(RcloneTransferStats { bytes: 50 });
+
+        assert!(recorded.speed > 0);
+
+        tracker.last_update_at =
+            Some(Instant::now() - RCLONE_STALE_SPEED_TIMEOUT);
+
+        let stats = tracker
+            .maybe_stale_stats(Instant::now())
+            .expect("stale stats");
+
+        assert_eq!(stats.speed, 0);
+        assert_eq!(stats.bytes, 50);
+    }
+
+    #[test]
+    fn parse_json_log_line_with_object() {
+        let json = r#"{"time":"2025-12-03T16:18:24.49104384+03:00","level":"error","msg":"error reading source root directory: directory not found","object":"webdav root 'Quest Games/A Fishermans Tale v16+1.064 -QU'","objectType":"*webdav.Fs","source":"slog/logger.go:256"}"#;
+
+        let parsed: RcloneJsonLogLine =
+            serde_json::from_str(json).unwrap();
+
+        assert_eq!(parsed.level, "error");
+        assert_eq!(
+            parsed.msg,
+            "error reading source root directory: directory not found"
+        );
+        assert_eq!(
+            parsed.object,
+            Some(
+                "webdav root 'Quest Games/A Fishermans Tale v16+1.064 -QU'"
+                    .to_string()
+            )
+        );
+        assert!(parsed.stats.is_none());
+    }
+
+    #[test]
+    fn parse_json_log_line_without_object() {
+        let json = r#"{"time":"2025-12-03T16:18:24.491141917+03:00","level":"error","msg":"Attempt 1/3 failed with 1 errors and: directory not found","source":"slog/logger.go:256"}"#;
+
+        let parsed: RcloneJsonLogLine =
+            serde_json::from_str(json).unwrap();
+
+        assert_eq!(parsed.level, "error");
+        assert_eq!(
+            parsed.msg,
+            "Attempt 1/3 failed with 1 errors and: directory not found"
+        );
+        assert!(parsed.object.is_none());
+        assert!(parsed.stats.is_none());
+    }
+
+    #[test]
+    fn parse_json_log_line_with_stats() {
+        let json = r#"{"time":"2025-12-03T16:36:50.513851561+03:00","level":"info","msg":"\nTransferred: ...","stats":{"bytes":39841792,"checks":0,"deletedDirs":0,"deletes":0,"elapsedTime":2.000537856,"errors":0,"eta":3,"fatalError":false,"listed":1,"renames":0,"retryError":false,"serverSideCopies":0,"serverSideCopyBytes":0,"serverSideMoveBytes":0,"serverSideMoves":0,"speed":19920887.154321734,"totalBytes":107369499,"totalChecks":0,"totalTransfers":1,"transferTime":1.907390027,"transfers":0},"source":"slog/logger.go:256"}"#;
+
+        let parsed: RcloneJsonLogLine =
+            serde_json::from_str(json).unwrap();
+
+        assert_eq!(parsed.level, "info");
+        assert!(parsed.stats.is_some());
+
+        let stats = parsed.stats.unwrap();
+        assert_eq!(stats.bytes, 39841792);
+    }
+
+    #[test]
+    fn to_human_readable_with_object() {
+        let log_line = RcloneJsonLogLine {
+            time: "2025-12-03T16:18:24.49104384+03:00".to_string(),
+            level: "error".to_string(),
+            msg: "error reading source root directory: directory not found".to_string(),
+            object: Some("webdav root 'Quest Games/Test'".to_string()),
+            stats: None,
+        };
+
+        let human = log_line.to_human_readable();
+
+        assert_eq!(
+            human,
+            "2025/12/03 16:18:24 ERROR : webdav root 'Quest Games/Test': error reading source \
+             root directory: directory not found"
+        );
+    }
+
+    #[test]
+    fn to_human_readable_without_object() {
+        let log_line = RcloneJsonLogLine {
+            time: "2025-12-03T16:18:24.491141917+03:00".to_string(),
+            level: "error".to_string(),
+            msg: "Attempt 1/3 failed with 1 errors and: directory not found".to_string(),
+            object: None,
+            stats: None,
+        };
+
+        let human = log_line.to_human_readable();
+
+        assert_eq!(
+            human,
+            "2025/12/03 16:18:24 ERROR : Attempt 1/3 failed with 1 errors and: directory not found"
+        );
+    }
+
+    #[test]
+    fn to_human_readable_notice_level() {
+        let log_line = RcloneJsonLogLine {
+            time: "2025-12-03T16:18:24.677564739+03:00".to_string(),
+            level: "notice".to_string(),
+            msg: "Failed to sync: directory not found".to_string(),
+            object: None,
+            stats: None,
+        };
+
+        let human = log_line.to_human_readable();
+
+        assert_eq!(
+            human,
+            "2025/12/03 16:18:24 NOTICE : Failed to sync: directory not found"
+        );
+    }
+
+    #[test]
+    fn format_time_iso_to_rclone() {
+        let log_line = RcloneJsonLogLine {
+            time: "2025-12-03T16:18:24.677508041+03:00".to_string(),
+            level: "info".to_string(),
+            msg: "test".to_string(),
+            object: None,
+            stats: None,
+        };
+
+        assert_eq!(
+            log_line.format_time(),
+            "2025/12/03 16:18:24"
+        );
+    }
+}
