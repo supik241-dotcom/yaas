@@ -1,3 +1,4 @@
+
 name: Android APK
 
 on:
@@ -14,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout YAAS
         uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -40,6 +41,83 @@ jobs:
       - name: Generate Android project
         run: flutter create --platforms=android --org com.yaas .
 
+      - name: Setup Android SDK and NDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: sdkmanager "ndk;28.2.13676358"
+
+      - name: Checkout rclone
+        uses: actions/checkout@v4
+        with:
+          repository: rclone/rclone
+          ref: v1.75.2
+          path: rclone-src
+          fetch-depth: 1
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: rclone-src/go.mod
+          cache-dependency-path: rclone-src/go.sum
+
+      - name: Build Android rclone
+        run: |
+          NDK="$ANDROID_HOME/ndk/28.2.13676358"
+          CC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
+          OUT="android/app/src/main/jniLibs/arm64-v8a/librclone.so"
+
+          test -x "$CC"
+          mkdir -p "$(dirname "$OUT")"
+
+          cd rclone-src
+
+          env GOOS=android GOARCH=arm64 CGO_ENABLED=1 \
+            CC="$CC" \
+            CGO_LDFLAGS="-fuse-ld=lld -s -w" \
+            go build -v -tags android -trimpath \
+            -ldflags="-s -w -X github.com/rclone/rclone/fs.Version=v1.75.2" \
+            -o "../$OUT" .
+
+          file "../$OUT"
+          readelf -h "../$OUT" | grep AArch64
+          test -s "../$OUT"
+
+      - name: Configure native library packaging
+        shell: bash
+        run: |
+          KTS="android/app/build.gradle.kts"
+          GROOVY="android/app/build.gradle"
+
+          if [ -f "$KTS" ]; then
+            cat >> "$KTS" <<'EOF'
+
+          android {
+              packaging {
+                  jniLibs {
+                      useLegacyPackaging = true
+                      keepDebugSymbols += "**/librclone.so"
+                  }
+              }
+          }
+          EOF
+          elif [ -f "$GROOVY" ]; then
+            cat >> "$GROOVY" <<'EOF'
+
+          android {
+              packaging {
+                  jniLibs {
+                      useLegacyPackaging true
+                      keepDebugSymbols += ['**/librclone.so']
+                  }
+              }
+          }
+          EOF
+          else
+            echo "Gradle file not found"
+            exit 1
+          fi
+
       - name: Get dependencies
         run: flutter pub get
 
@@ -54,20 +132,13 @@ jobs:
       - name: Build ARM64 APK
         run: flutter build apk --debug --split-per-abi
 
-      - name: Verify ARM64 APK
+      - name: Verify APK
         run: |
           APK=build/app/outputs/flutter-apk/app-arm64-v8a-debug.apk
-
           test -s "$APK"
-
-          echo "APK information:"
           ls -lh "$APK"
           file "$APK"
-
-          echo "APK SHA256:"
           sha256sum "$APK"
-
-          echo "APK integrity:"
           unzip -t "$APK"
 
       - name: Create GitHub Release
@@ -77,12 +148,8 @@ jobs:
           name: YAAS Android ARM64 Build ${{ github.run_number }}
           body: |
             YAAS Android ARM64 debug build.
-
-            Commit:
-            ${{ github.sha }}
-
-            Target architecture:
-            arm64-v8a
+            Commit: ${{ github.sha }}
+            Target architecture: arm64-v8a
           files: build/app/outputs/flutter-apk/app-arm64-v8a-debug.apk
           prerelease: true
           make_latest: false
