@@ -1,3 +1,4 @@
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -10,8 +11,6 @@ import '../../src/l10n/app_localizations.dart';
 import '../../utils/utils.dart';
 import '../common/selectable_link_text.dart';
 
-/// Renders userinfo, query and fragment of the URL as bullets unless
-/// [revealed], so pasted credentials don't show up in screenshots.
 class _SensitiveUrlController extends TextEditingController {
   static const _mask = '\u2022';
 
@@ -32,6 +31,7 @@ class _SensitiveUrlController extends TextEditingController {
     required bool withComposing,
   }) {
     final ranges = _revealed ? const <(int, int)>[] : _sensitiveRanges(text);
+
     if (ranges.isEmpty) {
       return super.buildTextSpan(
         context: context,
@@ -39,30 +39,40 @@ class _SensitiveUrlController extends TextEditingController {
         withComposing: withComposing,
       );
     }
+
     final buffer = StringBuffer();
     var pos = 0;
+
     for (final (start, end) in ranges) {
       buffer
         ..write(text.substring(pos, start))
         ..write(_mask * (end - start));
       pos = end;
     }
+
     buffer.write(text.substring(pos));
     return TextSpan(style: style, text: buffer.toString());
   }
 
   static List<(int, int)> _sensitiveRanges(String text) {
     final ranges = <(int, int)>[];
+
     final schemeEnd = text.indexOf('://');
     final authorityStart = schemeEnd < 0 ? 0 : schemeEnd + 3;
+
     var authorityEnd = text.indexOf(RegExp(r'[/?#]'), authorityStart);
     if (authorityEnd < 0) authorityEnd = text.length;
+
     final at = text.substring(authorityStart, authorityEnd).lastIndexOf('@');
-    if (at > 0) ranges.add((authorityStart, authorityStart + at));
+    if (at > 0) {
+      ranges.add((authorityStart, authorityStart + at));
+    }
+
     final tailStart = text.indexOf(RegExp(r'[?#]'), authorityStart);
     if (tailStart >= 0 && tailStart + 1 < text.length) {
       ranges.add((tailStart + 1, text.length));
     }
+
     return ranges;
   }
 }
@@ -71,15 +81,25 @@ class DownloaderSetupDialog extends StatefulWidget {
   const DownloaderSetupDialog({super.key});
 
   @override
-  State<DownloaderSetupDialog> createState() => _DownloaderSetupDialogState();
+  State<DownloaderSetupDialog> createState() =>
+      _DownloaderSetupDialogState();
 }
 
 class _DownloaderSetupDialogState extends State<DownloaderSetupDialog> {
   final _SensitiveUrlController _urlController = _SensitiveUrlController();
+  final TextEditingController _passwordController = TextEditingController();
+
   StreamSubscription<RustSignalPack<DownloaderConfigInstallResult>>?
       _installSub;
-  StreamSubscription<RustSignalPack<DownloaderSourceRemovedResult>>? _removeSub;
+
+  StreamSubscription<RustSignalPack<DownloaderSourceRemovedResult>>?
+      _removeSub;
+
+  StreamSubscription<RustSignalPack<DownloaderAvailabilityChanged>>?
+      _availabilitySub;
+
   bool _isAdding = false;
+  bool _isRetrying = false;
   String? _removingSourceId;
   String? _hoveredSourceId;
   bool _showAddSection = false;
@@ -88,6 +108,7 @@ class _DownloaderSetupDialogState extends State<DownloaderSetupDialog> {
   InputDecoration _buildUrlInputDecoration(AppLocalizations l10n) {
     final errorText = _errorText;
     final revealed = _urlController.revealed;
+
     final revealToggle = IconButton(
       tooltip: revealed
           ? l10n.downloaderConfigUrlHide
@@ -107,13 +128,10 @@ class _DownloaderSetupDialogState extends State<DownloaderSetupDialog> {
       );
     }
 
-    final decoration = InputDecoration(
+    return InputDecoration(
       labelText: l10n.downloaderConfigUrlLabel,
       suffixIcon: revealToggle,
       errorMaxLines: 4,
-    );
-
-    return decoration.copyWith(
       error: buildCopyableText(
         context,
         errorText,
@@ -141,53 +159,98 @@ class _DownloaderSetupDialogState extends State<DownloaderSetupDialog> {
   @override
   void initState() {
     super.initState();
+
     _installSub =
         DownloaderConfigInstallResult.rustSignalStream.listen(_onInstallResult);
+
     _removeSub =
         DownloaderSourceRemovedResult.rustSignalStream.listen(_onRemoveResult);
+
+    _availabilitySub =
+        DownloaderAvailabilityChanged.rustSignalStream.listen((event) {
+      if (!mounted) return;
+
+      if (!event.message.initializing) {
+        setState(() {
+          _isRetrying = false;
+        });
+      }
+    });
   }
 
   @override
   void dispose() {
     _installSub?.cancel();
     _removeSub?.cancel();
+    _availabilitySub?.cancel();
+
     _urlController.dispose();
+    _passwordController.dispose();
+
     super.dispose();
   }
 
   bool _isValidUrl(String value) {
     final url = value.trim();
+
     if (url.isEmpty) return false;
+
     final lower = url.toLowerCase();
-    if (!lower.startsWith('http://') && !lower.startsWith('https://')) {
+
+    if (!lower.startsWith('http://') &&
+        !lower.startsWith('https://')) {
       return false;
     }
+
     return Uri.tryParse(url)?.hasAbsolutePath ?? false;
+  }
+
+  String? get _passwordOrNull {
+    final value = _passwordController.text;
+    return value.isEmpty ? null : value;
   }
 
   void _onAddPressed() {
     final l10n = AppLocalizations.of(context);
     final url = _urlController.text.trim();
+
     if (!_isValidUrl(url)) {
       setState(() {
         _errorText = l10n.downloaderConfigUrlInvalid;
       });
       return;
     }
+
     setState(() {
       _isAdding = true;
       _errorText = null;
       _urlController.revealed = false;
     });
-    InstallDownloaderConfigFromUrlRequest(url: url).sendSignalToRust();
+
+    InstallDownloaderConfigFromUrlRequest(
+      url: url,
+      rcloneConfigPassword: _passwordOrNull,
+    ).sendSignalToRust();
+  }
+
+  void _onRetryPressed() {
+    if (_isRetrying) return;
+
+    setState(() {
+      _isRetrying = true;
+    });
+
+    RetryDownloaderInitRequest(
+      rcloneConfigPassword: _passwordOrNull,
+    ).sendSignalToRust();
   }
 
   void _onInstallResult(
     RustSignalPack<DownloaderConfigInstallResult> pack,
   ) {
-    if (!_isAdding) return;
+    if (!_isAdding || !mounted) return;
+
     final result = pack.message;
-    if (!mounted) return;
 
     if (result.success) {
       setState(() {
@@ -195,9 +258,11 @@ class _DownloaderSetupDialogState extends State<DownloaderSetupDialog> {
         _showAddSection = false;
         _errorText = null;
         _urlController.clear();
+        _passwordController.clear();
       });
     } else {
       final l10n = AppLocalizations.of(context);
+
       setState(() {
         _isAdding = false;
         _showAddSection = true;
@@ -212,18 +277,24 @@ class _DownloaderSetupDialogState extends State<DownloaderSetupDialog> {
     RustSignalPack<DownloaderSourceRemovedResult> pack,
   ) {
     if (!mounted || _removingSourceId != pack.message.configId) return;
+
     setState(() {
       _removingSourceId = null;
     });
   }
 
-  Future<void> _confirmRemoveSource(InstalledDownloaderConfig source) async {
+  Future<void> _confirmRemoveSource(
+    InstalledDownloaderConfig source,
+  ) async {
     final l10n = AppLocalizations.of(context);
+
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: Text(l10n.downloaderSourceRemoveTitle),
-        content: Text(l10n.downloaderSourceRemoveConfirm(source.displayName)),
+        content: Text(
+          l10n.downloaderSourceRemoveConfirm(source.displayName),
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
@@ -236,11 +307,13 @@ class _DownloaderSetupDialogState extends State<DownloaderSetupDialog> {
         ],
       ),
     );
+
     if (confirmed != true || !mounted) return;
 
     setState(() {
       _removingSourceId = source.id;
     });
+
     context.read<SettingsState>().removeDownloaderSource(source.id);
   }
 
@@ -253,8 +326,10 @@ class _DownloaderSetupDialogState extends State<DownloaderSetupDialog> {
     final error = source.error;
     final valid = error == null;
     final selected = valid && source.id == selectedId;
+
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
+
     final isRemoving = _removingSourceId == source.id;
     final showRemoveAction =
         !valid || isRemoving || _hoveredSourceId == source.id;
@@ -290,18 +365,26 @@ class _DownloaderSetupDialogState extends State<DownloaderSetupDialog> {
                 }
               : null,
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+            padding: const EdgeInsets.symmetric(
+              horizontal: 8,
+              vertical: 10,
+            ),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Padding(
                   padding: const EdgeInsets.only(top: 2),
                   child: valid
-                      ? Radio<String>(value: source.id, enabled: enabled)
+                      ? Radio<String>(
+                          value: source.id,
+                          enabled: enabled,
+                        )
                       : SizedBox.square(
                           dimension: 48,
-                          child: Icon(Icons.warning_amber_rounded,
-                              color: colorScheme.error),
+                          child: Icon(
+                            Icons.warning_amber_rounded,
+                            color: colorScheme.error,
+                          ),
                         ),
                 ),
                 const SizedBox(width: 8),
@@ -333,7 +416,8 @@ class _DownloaderSetupDialogState extends State<DownloaderSetupDialog> {
                       if (error != null) ...[
                         const SizedBox(height: 6),
                         Text(
-                          AppLocalizations.of(context).downloaderSourceInvalid,
+                          AppLocalizations.of(context)
+                              .downloaderSourceInvalid,
                           style: theme.textTheme.bodySmall?.copyWith(
                             color: colorScheme.error,
                             fontWeight: FontWeight.w600,
@@ -358,7 +442,9 @@ class _DownloaderSetupDialogState extends State<DownloaderSetupDialog> {
                     ignoring: !showRemoveAction,
                     child: IconButton(
                       tooltip: AppLocalizations.of(context)
-                          .downloaderSourceRemoveTooltip(source.displayName),
+                          .downloaderSourceRemoveTooltip(
+                        source.displayName,
+                      ),
                       onPressed: enabled && !isRemoving
                           ? () => _confirmRemoveSource(source)
                           : null,
@@ -372,7 +458,9 @@ class _DownloaderSetupDialogState extends State<DownloaderSetupDialog> {
                           ? const SizedBox(
                               width: 16,
                               height: 16,
-                              child: CircularProgressIndicator(strokeWidth: 2),
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                              ),
                             )
                           : const Icon(Icons.delete_outline),
                     ),
@@ -395,16 +483,25 @@ class _DownloaderSetupDialogState extends State<DownloaderSetupDialog> {
       builder: (context, settingsState, _) {
         final sources = settingsState.downloaderSources;
         final selectedId = settingsState.downloaderConfigId;
+
         final busy = _isAdding ||
+            _isRetrying ||
             _removingSourceId != null ||
             settingsState.isDownloaderSourcesRefreshing;
+
         final showAddSection =
             _showAddSection || sources.isEmpty || _errorText != null;
+
+        final hasDownloaderError =
+            settingsState.downloaderError != null &&
+            settingsState.downloaderError!.isNotEmpty;
 
         return AlertDialog(
           title: Row(
             children: [
-              Expanded(child: Text(l10n.downloaderConfigFromUrlTitle)),
+              Expanded(
+                child: Text(l10n.downloaderConfigFromUrlTitle),
+              ),
               SizedBox(
                 width: 36,
                 height: 36,
@@ -426,121 +523,183 @@ class _DownloaderSetupDialogState extends State<DownloaderSetupDialog> {
           ),
           content: SizedBox(
             width: 560,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  l10n.downloaderConfigFromUrlDescription,
-                  style: Theme.of(context).textTheme.bodyMedium,
-                ),
-                if (settingsState.downloaderSourcesError != null) ...[
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    l10n.downloaderConfigFromUrlDescription,
+                    style: Theme.of(context).textTheme.bodyMedium,
+                  ),
+                  if (settingsState.downloaderSourcesError != null) ...[
+                    const SizedBox(height: 12),
+                    _buildCopyableError(
+                      settingsState.downloaderSourcesError!,
+                    ),
+                  ],
                   const SizedBox(height: 12),
-                  _buildCopyableError(settingsState.downloaderSourcesError!),
-                ],
-                const SizedBox(height: 12),
-                ConstrainedBox(
-                  constraints: const BoxConstraints(maxHeight: 280),
-                  child: sources.isEmpty
-                      ? Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                          child: Text(
-                            l10n.downloaderSourcesEmpty,
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 280),
+                    child: sources.isEmpty
+                        ? Padding(
+                            padding: const EdgeInsets.symmetric(
+                              vertical: 12,
+                            ),
+                            child: Text(
+                              l10n.downloaderSourcesEmpty,
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .bodyMedium
+                                  ?.copyWith(
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .onSurfaceVariant,
+                                  ),
+                            ),
+                          )
+                        : RadioGroup<String>(
+                            groupValue: selectedId,
+                            onChanged: (value) {
+                              if (busy || value == null) return;
+
+                              settingsState.selectDownloaderSource(value);
+                              Navigator.of(context).pop();
+                            },
+                            child: SingleChildScrollView(
+                              child: Column(
+                                crossAxisAlignment:
+                                    CrossAxisAlignment.stretch,
+                                children: [
+                                  for (var i = 0;
+                                      i < sources.length;
+                                      i++) ...[
+                                    _buildSourceTile(
+                                      context,
+                                      sources[i],
+                                      selectedId,
+                                      !busy,
+                                    ),
+                                    if (i != sources.length - 1)
+                                      const SizedBox(height: 4),
+                                  ],
+                                ],
+                              ),
+                            ),
+                          ),
+                  ),
+
+                  // Пароль для повторной инициализации.
+                  if (hasDownloaderError) ...[
+                    const SizedBox(height: 12),
+                    const Divider(),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Downloader initialization failed. Enter the rclone config password and retry.',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            color: Theme.of(context).colorScheme.error,
+                          ),
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: _passwordController,
+                      obscureText: true,
+                      enabled: !_isRetrying,
+                      decoration: const InputDecoration(
+                        labelText: 'Rclone config password',
+                        border: OutlineInputBorder(),
+                        prefixIcon: Icon(Icons.lock_outline),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: FilledButton.icon(
+                        onPressed: busy ? null : _onRetryPressed,
+                        icon: _isRetrying
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.refresh),
+                        label: Text(
+                          _isRetrying
+                              ? 'Retrying...'
+                              : 'Retry initialization',
+                        ),
+                      ),
+                    ),
+                  ],
+
+                  const SizedBox(height: 12),
+                  const Divider(height: 1),
+                  const SizedBox(height: 8),
+
+                  InkWell(
+                    borderRadius: BorderRadius.circular(8),
+                    onTap: (busy && !showAddSection) || sources.isEmpty
+                        ? null
+                        : () {
+                            setState(() {
+                              _showAddSection = !showAddSection;
+                            });
+                          },
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 8,
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            l10n.downloaderSourcesAddTitle,
                             style: Theme.of(context)
                                 .textTheme
-                                .bodyMedium
+                                .bodySmall
                                 ?.copyWith(
-                                  color: Theme.of(context)
-                                      .colorScheme
-                                      .onSurfaceVariant,
+                                  color:
+                                      Theme.of(context).colorScheme.primary,
+                                  fontWeight: FontWeight.w600,
                                 ),
                           ),
-                        )
-                      : RadioGroup<String>(
-                          groupValue: selectedId,
-                          onChanged: (value) {
-                            if (busy || value == null) return;
-                            settingsState.selectDownloaderSource(value);
-                            Navigator.of(context).pop();
-                          },
-                          child: SingleChildScrollView(
+                          const SizedBox(width: 4),
+                          AnimatedRotation(
+                            turns: showAddSection ? 0.5 : 0,
+                            duration: const Duration(milliseconds: 180),
+                            child: Icon(
+                              Icons.expand_more,
+                              size: 18,
+                              color:
+                                  Theme.of(context).colorScheme.primary,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+
+                  AnimatedSize(
+                    duration: const Duration(milliseconds: 180),
+                    curve: Curves.easeInOut,
+                    child: showAddSection
+                        ? Padding(
+                            padding: const EdgeInsets.only(
+                              top: 4,
+                              bottom: 4,
+                            ),
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.stretch,
                               children: [
-                                for (var i = 0; i < sources.length; i++) ...[
-                                  _buildSourceTile(
-                                    context,
-                                    sources[i],
-                                    selectedId,
-                                    !busy,
-                                  ),
-                                  if (i != sources.length - 1)
-                                    const SizedBox(height: 4),
-                                ],
-                              ],
-                            ),
-                          ),
-                        ),
-                ),
-                const SizedBox(height: 12),
-                const Divider(height: 1),
-                const SizedBox(height: 8),
-                InkWell(
-                  borderRadius: BorderRadius.circular(8),
-                  onTap: (busy && !showAddSection) || sources.isEmpty
-                      ? null
-                      : () {
-                          setState(() {
-                            _showAddSection = !showAddSection;
-                          });
-                        },
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 8,
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          l10n.downloaderSourcesAddTitle,
-                          style: Theme.of(context)
-                              .textTheme
-                              .bodySmall
-                              ?.copyWith(
-                                color: Theme.of(context).colorScheme.primary,
-                                fontWeight: FontWeight.w600,
-                              ),
-                        ),
-                        const SizedBox(width: 4),
-                        AnimatedRotation(
-                          turns: showAddSection ? 0.5 : 0,
-                          duration: const Duration(milliseconds: 180),
-                          child: Icon(
-                            Icons.expand_more,
-                            size: 18,
-                            color: Theme.of(context).colorScheme.primary,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                AnimatedSize(
-                  duration: const Duration(milliseconds: 180),
-                  curve: Curves.easeInOut,
-                  child: showAddSection
-                      ? Padding(
-                          padding: const EdgeInsets.only(top: 4, bottom: 4),
-                          child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Expanded(
-                                child: TextField(
+                                TextField(
                                   controller: _urlController,
                                   enabled: !busy,
                                   autofocus: sources.isEmpty,
-                                  decoration: _buildUrlInputDecoration(l10n),
+                                  decoration:
+                                      _buildUrlInputDecoration(l10n),
                                   onChanged: (_) {
                                     if (_errorText != null) {
                                       setState(() {
@@ -551,41 +710,56 @@ class _DownloaderSetupDialogState extends State<DownloaderSetupDialog> {
                                     }
                                   },
                                 ),
-                              ),
-                              const SizedBox(width: 12),
-                              Padding(
-                                padding: const EdgeInsets.only(top: 8),
-                                child: FilledButton(
-                                  onPressed: canAdd ? _onAddPressed : null,
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      if (_isAdding) ...[
-                                        const SizedBox(
-                                          width: 16,
-                                          height: 16,
-                                          child: CircularProgressIndicator(
-                                            strokeWidth: 2,
-                                          ),
-                                        ),
-                                        const SizedBox(width: 8),
-                                      ],
-                                      Text(
-                                        _isAdding
-                                            ? l10n.downloaderConfigInstalling
-                                            : l10n
-                                                .downloaderConfigInstallButton,
-                                      ),
-                                    ],
+                                const SizedBox(height: 10),
+                                TextField(
+                                  controller: _passwordController,
+                                  enabled: !busy,
+                                  obscureText: true,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Rclone config password',
+                                    hintText: 'Optional',
+                                    border: OutlineInputBorder(),
+                                    prefixIcon: Icon(Icons.lock_outline),
                                   ),
                                 ),
-                              ),
-                            ],
-                          ),
-                        )
-                      : const SizedBox.shrink(),
-                ),
-              ],
+                                const SizedBox(height: 10),
+                                Align(
+                                  alignment: Alignment.centerRight,
+                                  child: FilledButton(
+                                    onPressed:
+                                        canAdd ? _onAddPressed : null,
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        if (_isAdding) ...[
+                                          const SizedBox(
+                                            width: 16,
+                                            height: 16,
+                                            child:
+                                                CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                            ),
+                                          ),
+                                          const SizedBox(width: 8),
+                                        ],
+                                        Text(
+                                          _isAdding
+                                              ? l10n
+                                                  .downloaderConfigInstalling
+                                              : l10n
+                                                  .downloaderConfigInstallButton,
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          )
+                        : const SizedBox.shrink(),
+                  ),
+                ],
+              ),
             ),
           ),
           actions: [
