@@ -46,7 +46,6 @@ struct ControllerState {
     active: Option<DownloaderConfig>,
     initialization: Option<Initialization>,
     refreshing: usize,
-    rclone_config_password: Option<(String, String)>,
 }
 
 struct Initialization {
@@ -181,13 +180,6 @@ impl DownloaderController {
             return persisted;
         };
 
-        let config_password = state
-            .rclone_config_password
-            .as_ref()
-            .and_then(|(config_id, password)| {
-                (config_id == &cfg.id).then(|| password.clone())
-            });
-
         let availability = DownloaderAvailabilityReporter::new(&cfg);
         availability.send_initializing();
 
@@ -211,7 +203,6 @@ impl DownloaderController {
                     &cfg,
                     &cache_dir,
                     &settings,
-                    config_password,
                     &cancel,
                 )
                 .await
@@ -264,7 +255,6 @@ impl DownloaderController {
     async fn install_from_url(
         self: &Arc<Self>,
         url: SensitiveUrl<'_>,
-        config_password: Option<String>,
     ) {
         let result = async {
             let fetched = fetch_config(url, None).await?;
@@ -272,12 +262,6 @@ impl DownloaderController {
             let mut state = self.state.lock().await;
 
             let cfg = fetched.commit(self.sources.app_dir())?;
-
-            state.rclone_config_password = match &cfg.backend {
-                Backend::Ffa(_) => config_password
-                    .map(|password| (cfg.id.clone(), password)),
-                Backend::NewRepo(_) => None,
-            };
 
             self.sources.select_active(&cfg.id)?;
 
@@ -319,14 +303,6 @@ impl DownloaderController {
             let mut state = self.state.lock().await;
 
             self.sources.remove(&config_id)?;
-
-            if state
-                .rclone_config_password
-                .as_ref()
-                .is_some_and(|(id, _)| id == &config_id)
-            {
-                state.rclone_config_password = None;
-            }
 
             self.reconcile(&mut state, false, &[]).await
         }
@@ -480,7 +456,7 @@ impl DownloaderController {
                 debug!(url = %url, "Received InstallDownloaderConfigFromUrlRequest");
 
                 controller
-                    .install_from_url(url, req.rclone_config_password)
+                    .install_from_url(url)
                     .await;
             },
         );
@@ -508,15 +484,9 @@ impl DownloaderController {
         );
 
         self.spawn_request_handler(
-            |controller, req: RetryDownloaderInitRequest| async move {
+            |controller, _req: RetryDownloaderInitRequest| async move {
                 let result = async {
                     let mut state = controller.state.lock().await;
-                    let sources = controller.sources.load()?;
-
-                    state.rclone_config_password = sources
-                        .active_config_id
-                        .zip(req.rclone_config_password);
-
                     controller.reconcile(&mut state, true, &[]).await
                 }
                 .await;
@@ -710,7 +680,7 @@ mod tests {
         tokio::task::JoinHandle<()>,
     ) {
         let listener =
-            tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            tokio::net::TcpListener::bind("127.0.0.1:0).await.unwrap();
 
         let url = format!("http://{}/config", listener.local_addr().unwrap());
 
