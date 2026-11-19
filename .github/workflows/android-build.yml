@@ -108,15 +108,15 @@ jobs:
 
           plugins {
               id("dev.flutter.flutter-plugin-loader") version "1.0.0"
-              id("com.android.application") version "8.11.1" apply false
-              id("org.jetbrains.kotlin.android") version "2.2.20" apply false
+              id("com.android.application") version "9.3.1" apply false
+              id("org.jetbrains.kotlin.android") version "2.4.20" apply false
           }
 
           include(":app")
           EOF
 
           sed -i \
-            's#^distributionUrl=.*#distributionUrl=https\\://services.gradle.org/distributions/gradle-8.14.3-all.zip#' \
+            's#^distributionUrl=.*#distributionUrl=https\\://services.gradle.org/distributions/gradle-9.5.0-bin.zip#' \
             android/gradle/wrapper/gradle-wrapper.properties
 
           chmod +x android/gradlew
@@ -212,9 +212,10 @@ jobs:
           grep -q "android.permission.INTERNET" \
             android/app/src/main/AndroidManifest.xml
 
-          grep -q "2.2.20" android/settings.gradle.kts
-          grep -q "8.11.1" android/settings.gradle.kts
-          grep -q "8.14.3" android/gradle/wrapper/gradle-wrapper.properties
+          grep -q "2.4.20" android/settings.gradle.kts
+          grep -q "9.3.1" android/settings.gradle.kts
+          grep -q "gradle-9.5.0-bin.zip" \
+            android/gradle/wrapper/gradle-wrapper.properties
 
           echo "Android configuration OK"
 
