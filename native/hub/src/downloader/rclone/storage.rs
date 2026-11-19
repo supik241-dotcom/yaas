@@ -22,7 +22,7 @@ pub(crate) struct RcloneStorage {
     remote_filter_regex: Option<Regex>,
 }
 
-// Не выводим содержимое клиента: там может находиться пароль конфига.
+// Не выводим внутреннее состояние клиента.
 impl fmt::Debug for RcloneStorage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RcloneStorage")
@@ -34,7 +34,6 @@ impl fmt::Debug for RcloneStorage {
 }
 
 impl RcloneStorage {
-    #[instrument(skip(config_password))]
     pub(crate) fn new(
         rclone_path: PathBuf,
         config_path: PathBuf,
@@ -42,7 +41,6 @@ impl RcloneStorage {
         remote: String,
         bandwidth_limit: String,
         remote_filter_regex: Option<String>,
-        config_password: Option<String>,
     ) -> Self {
         let compiled = match &remote_filter_regex {
             Some(pat) => match Regex::new(pat) {
@@ -59,10 +57,8 @@ impl RcloneStorage {
             None => None,
         };
 
-        let mut client =
+        let client =
             RcloneCli::new(rclone_path, config_path, bandwidth_limit);
-
-        client.set_config_password(config_password);
 
         Self {
             client,
