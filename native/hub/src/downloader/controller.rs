@@ -680,7 +680,7 @@ mod tests {
         tokio::task::JoinHandle<()>,
     ) {
         let listener =
-            tokio::net::TcpListener::bind("127.0.0.1:0).await.unwrap();
+            tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 
         let url = format!("http://{}/config", listener.local_addr().unwrap());
 
