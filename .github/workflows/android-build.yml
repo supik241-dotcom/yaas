@@ -78,6 +78,15 @@ jobs:
             flutter create --platforms=android --org com.skrimix .
           fi
 
+      - name: Remove generated Flutter template test
+        run: |
+          if [ -f test/widget_test.dart ]; then
+            rm -f test/widget_test.dart
+            echo "Removed generated Flutter template test"
+          else
+            echo "No generated widget_test.dart found"
+          fi
+
       - name: Add Internet permission
         run: |
           python3 - <<'PY'
@@ -130,7 +139,8 @@ jobs:
           cargo test --locked -p hub manual_refresh_updates_runtime_files_at_unchanged_urls
 
       - name: Flutter tests
-        run: flutter test
+        run: |
+          flutter test
 
       - name: Clean Flutter
         run: flutter clean
