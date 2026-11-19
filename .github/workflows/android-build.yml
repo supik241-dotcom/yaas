@@ -2,10 +2,12 @@
 name: YAAS Android Release
 
 on:
+  workflow_dispatch:
+
   push:
     branches:
+      - android-port
       - master
-  workflow_dispatch:
 
 permissions:
   contents: write
@@ -15,19 +17,20 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build Android ARM64 Release
-    runs-on: ubuntu-latest
+  android-release:
+    name: Build YAAS Android ARM64 Release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -37,57 +40,251 @@ jobs:
           cache: true
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          targets: aarch64-linux-android
+          build-warnings: ""
 
       - name: Install Rinf CLI
-        run: cargo install rinf_cli --version 8.10.1 --locked
-
-      - name: Generate Android project
         run: |
-          if [ ! -d android ]; then
-            flutter create \
-              --platforms=android \
-              --org com.yaas \
-              --project-name yaas .
+          cargo install rinf_cli --version 8.10.1 --locked
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          rinf --help
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 12266719
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: true
+          packages: platform-tools platforms;android-36 build-tools;36.0.0 ndk;28.2.13676358
+
+      - name: Set Android SDK variables
+        run: |
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/28.2.13676358" >> "$GITHUB_ENV"
+
+      - name: Check Java and Internet
+        run: |
+          java -version
+          javac -version
+          curl -I --max-time 20 https://github.com
+          curl -I --max-time 20 https://pub.dev
+          curl -I --max-time 20 https://repo.maven.apache.org/maven2
+
+      - name: Create Android platform
+        run: |
+          if [ ! -f android/app/build.gradle ] && \
+             [ ! -f android/app/build.gradle.kts ]; then
+            flutter create --platforms=android --org com.skrimix .
           fi
 
+          test -f android/settings.gradle.kts
+          test -f android/gradle/wrapper/gradle-wrapper.properties
+
+      - name: Fix Android Gradle configuration
+        run: |
+          cat > android/settings.gradle.kts <<'EOF'
+          pluginManagement {
+              val flutterSdkPath = run {
+                  val properties = java.util.Properties()
+                  file("local.properties").inputStream().use {
+                      properties.load(it)
+                  }
+                  val flutterSdkPath = properties.getProperty("flutter.sdk")
+                  require(flutterSdkPath != null) {
+                      "flutter.sdk not set in local.properties"
+                  }
+                  flutterSdkPath
+              }
+
+              includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")
+
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          plugins {
+              id("dev.flutter.flutter-plugin-loader") version "1.0.0"
+              id("com.android.application") version "8.11.1" apply false
+              id("org.jetbrains.kotlin.android") version "2.2.20" apply false
+          }
+
+          include(":app")
+          EOF
+
+          sed -i \
+            's#^distributionUrl=.*#distributionUrl=https\\://services.gradle.org/distributions/gradle-8.14.3-all.zip#' \
+            android/gradle/wrapper/gradle-wrapper.properties
+
+          chmod +x android/gradlew
+
+          echo "Gradle configuration:"
+          cat android/gradle/wrapper/gradle-wrapper.properties
+
+          echo "Android Gradle configuration fixed"
+
+      - name: Verify Gradle configuration
+        working-directory: android
+        run: |
+          ./gradlew --version
+
+      - name: Remove generated Flutter template test
+        run: |
+          rm -f test/widget_test.dart
+
+      - name: Add Internet permission
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          manifest = Path("android/app/src/main/AndroidManifest.xml")
+
+          if not manifest.exists():
+              raise SystemExit("AndroidManifest.xml not found")
+
+          content = manifest.read_text()
+
+          permission = (
+              '<uses-permission '
+              'android:name="android.permission.INTERNET"/>'
+          )
+
+          if "android.permission.INTERNET" not in content:
+              content = content.replace(
+                  "<application",
+                  permission + "\n    <application",
+                  1
+              )
+              manifest.write_text(content)
+
+          print("INTERNET permission OK")
+          PY
+
+      - name: Flutter Doctor
+        run: flutter doctor -v
+
+      - name: Flutter dependencies
+        run: flutter pub get --enforce-lockfile
+
       - name: Generate Rinf bindings
-        run: rinf gen
+        run: |
+          rinf gen
 
-      - name: Get Flutter dependencies
-        run: flutter pub get
+          test -f lib/src/bindings/bindings.dart
+          test -f lib/src/bindings/signals/signals.dart
 
-      - name: Clean previous build
+      - name: Generate localization
+        run: flutter gen-l10n
+
+      - name: Test Rclone
+        run: cargo test --locked -p hub downloader::rclone
+
+      - name: Test Rclone config refresh
+        run: cargo test --locked -p hub manual_refresh_updates_runtime_files_at_unchanged_urls
+
+      - name: Flutter tests
+        run: flutter test
+
+      - name: Clean Flutter
         run: flutter clean
 
-      - name: Get dependencies again
-        run: flutter pub get
+      - name: Restore Flutter dependencies
+        run: flutter pub get --enforce-lockfile
 
-      - name: Build APK ARM64 Release
+      - name: Regenerate Rinf bindings
+        run: |
+          rinf gen
+
+          test -f lib/src/bindings/bindings.dart
+          test -f lib/src/bindings/signals/signals.dart
+
+      - name: Regenerate localization
+        run: flutter gen-l10n
+
+      - name: Verify Android configuration
+        run: |
+          test -f android/settings.gradle.kts
+          test -f android/app/src/main/AndroidManifest.xml
+
+          grep -q "android.permission.INTERNET" \
+            android/app/src/main/AndroidManifest.xml
+
+          grep -q "2.2.20" android/settings.gradle.kts
+          grep -q "8.11.1" android/settings.gradle.kts
+          grep -q "8.14.3" android/gradle/wrapper/gradle-wrapper.properties
+
+          echo "Android configuration OK"
+
+      - name: Build Android ARM64 Release
         run: |
           flutter build apk \
             --release \
             --target-platform android-arm64
 
-      - name: Verify APK
+      - name: Verify APK exists
         run: |
           APK="build/app/outputs/flutter-apk/app-release.apk"
 
-          if [ ! -f "$APK" ]; then
-            echo "ERROR: APK not found!"
-            exit 1
-          fi
+          test -s "$APK"
 
-          echo "APK successfully built!"
+          echo "APK successfully built:"
           ls -lh "$APK"
+
+      - name: Verify APK integrity
+        run: |
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+
+          unzip -tq "$APK"
+
+          echo "APK integrity OK"
+
+      - name: Verify APK permissions
+        run: |
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+
+          "$ANDROID_HOME/build-tools/36.0.0/aapt2" \
+            dump permissions "$APK" | tee apk-permissions.txt
+
+          grep -q "android.permission.INTERNET" apk-permissions.txt
+
+      - name: Verify APK architecture
+        run: |
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+
+          unzip -l "$APK" | grep "lib/arm64-v8a/"
+
+          echo "ARM64 architecture OK"
+
+      - name: Verify APK alignment
+        run: |
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" \
+            -c -P 16 -v 4 "$APK"
+
+      - name: Verify APK signature
+        run: |
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" \
+            verify --verbose "$APK"
+
+      - name: APK information
+        run: |
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+
+          "$ANDROID_HOME/build-tools/36.0.0/aapt2" \
+            dump badging "$APK"
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: android-v${{ github.run_number }}
           name: YAAS Android Release v${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
           draft: false
           prerelease: false
