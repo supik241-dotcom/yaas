@@ -6,16 +6,10 @@ use crate::models::InstalledDownloaderConfig;
 #[derive(serde::Serialize, serde::Deserialize, DartSignal)]
 pub(crate) struct InstallDownloaderConfigFromUrlRequest {
     pub url: String,
-
-    #[serde(default)]
-    pub rclone_config_password: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, DartSignal)]
-pub(crate) struct RetryDownloaderInitRequest {
-    #[serde(default)]
-    pub rclone_config_password: Option<String>,
-}
+pub(crate) struct RetryDownloaderInitRequest {}
 
 #[derive(serde::Serialize, serde::Deserialize, DartSignal)]
 pub(crate) struct RefreshDownloaderSourcesRequest {}
