@@ -1,327 +1,47 @@
-name: YAAS Android APK
+name: Android Check
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - android-port
-
-permissions:
-  contents: write
 
 jobs:
-  build:
+  android-check:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
-      - name: Setup Java 17
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install rinf CLI
-        shell: bash
-        run: |
-          cargo install rinf_cli --locked
+          java-version: '17'
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
+          flutter-version: '3.50.0'
           channel: stable
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.27.x"
-
-      - name: Create Android platform
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          flutter create \
-            --platforms=android \
-            --org com.yaas \
-            .
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK components
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          sdkmanager "platform-tools"
-          sdkmanager "platforms;android-35"
-          sdkmanager "build-tools;35.0.0"
-          sdkmanager "ndk;28.2.13676358"
-
-      - name: Configure Android project
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          path = Path("android/app/build.gradle.kts")
-          text = path.read_text()
-
-          if "minSdk" in text:
-              text = re.sub(
-                  r"minSdk\s*=\s*.*",
-                  'minSdk = 23',
-                  text
-              )
-
-          if "targetSdk" in text:
-              text = re.sub(
-                  r"targetSdk\s*=\s*.*",
-                  'targetSdk = 35',
-                  text
-              )
-
-          if "ndkVersion" in text:
-              text = re.sub(
-                  r'ndkVersion\s*=\s*".*?"',
-                  'ndkVersion = "28.2.13676358"',
-                  text
-              )
-
-          path.write_text(text)
-          PY
-
-      - name: Build bundled Android rclone
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          RCLONE_VERSION="v1.76.0"
-          NDK="$ANDROID_HOME/ndk/28.2.13676358"
-          RCLONE_DIR="$RUNNER_TEMP/rclone"
-
-          DEST="$GITHUB_WORKSPACE/android/app/src/main/jniLibs/arm64-v8a/librclone.so"
-
-          git clone \
-            --depth 1 \
-            --branch "$RCLONE_VERSION" \
-            https://github.com/rclone/rclone.git \
-            "$RCLONE_DIR"
-
-          mkdir -p "$(dirname "$DEST")"
-
-          cd "$RCLONE_DIR"
-
-          export ANDROID_NDK="$NDK"
-          export CC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
-          export CC_FOR_TARGET="$CC"
-
-          export GOOS=android
-          export GOARCH=arm64
-          export GOARM64=v8.0
-          export CGO_ENABLED=1
-
-          go build \
-            -tags android \
-            -trimpath \
-            -ldflags="-s -w -X github.com/rclone/rclone/fs.Version=$RCLONE_VERSION" \
-            -o "$DEST" .
-
-          chmod 755 "$DEST"
-
-          echo "Checking rclone binary..."
-          file "$DEST"
-
-          readelf -h "$DEST" | grep -E \
-            'Class:|Data:|Machine:|Type:'
-
-          test -s "$DEST"
-
-          echo "rclone build OK"
-
-      - name: Configure Android manifest
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path("android/app/src/main/AndroidManifest.xml")
-          text = path.read_text()
-
-          if 'android.permission.INTERNET' not in text:
-              text = text.replace(
-                  '<manifest xmlns:android="http://schemas.android.com/apk/res/android">',
-                  '<manifest xmlns:android="http://schemas.android.com/apk/res/android">\n'
-                  '    <uses-permission android:name="android.permission.INTERNET" />'
-              )
-
-          text = text.replace(
-              '<application',
-              '<application android:extractNativeLibs="true"',
-              1
-          )
-
-          path.write_text(text)
-          PY
-
-      - name: Configure native library packaging
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path("android/app/build.gradle.kts")
-          text = path.read_text()
-
-          if "packaging {" not in text:
-              text += '''
-
-          android {
-              packaging {
-                  jniLibs {
-                      useLegacyPackaging = true
-                  }
-              }
-
-              lint {
-                  checkReleaseBuilds = false
-                  abortOnError = false
-              }
-          }
-          '''
-          elif "useLegacyPackaging" not in text:
-              text = text.replace(
-                  "packaging {",
-                  """packaging {
-                  jniLibs {
-                      useLegacyPackaging = true
-                  }""",
-                  1
-              )
-
-          path.write_text(text)
-          PY
-
-      - name: Flutter dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          flutter clean
-          flutter pub get
-
-      - name: Generate Rinf bindings
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          rinf gen
-
-      - name: Build Release APK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          flutter build apk \
-            --release \
-            --target-platform android-arm64
-
-      - name: Check APK exists
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APK="build/app/outputs/flutter-apk/app-release.apk"
-
-          test -f "$APK"
-          test -s "$APK"
-
-          echo "APK:"
-          ls -lh "$APK"
-
-      - name: Verify required native libraries and assets
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APK="build/app/outputs/flutter-apk/app-release.apk"
-
-          unzip -l "$APK" | grep "lib/arm64-v8a/"
-          unzip -l "$APK" | grep "librclone.so"
-
-          echo "Native libraries OK"
-
-      - name: Verify Internet permission
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APK="build/app/outputs/flutter-apk/app-release.apk"
-
-          if command -v aapt >/dev/null 2>&1; then
-              aapt dump permissions "$APK" | grep "android.permission.INTERNET"
-          else
-              echo "aapt not found, skipping direct permission check"
-          fi
-
-      - name: Verify APK integrity
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APK="build/app/outputs/flutter-apk/app-release.apk"
-
-          unzip -t "$APK"
-
-          echo "APK ZIP integrity OK"
-
-      - name: Verify APK signature
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APK="build/app/outputs/flutter-apk/app-release.apk"
-
-          if command -v apksigner >/dev/null 2>&1; then
-              apksigner verify --verbose "$APK"
-          else
-              echo "apksigner not found"
-              exit 1
-          fi
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
         with:
-          name: YAAS-Android-Release-arm64
-          path: build/app/outputs/flutter-apk/app-release.apk
-          if-no-files-found: error
+          cmdline-tools-version: 12266719
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: true
+          packages: platform-tools
 
-      - name: Calculate APK SHA256
-        shell: bash
-        run: |
-          set -euo pipefail
+      - name: Flutter Doctor
+        run: flutter doctor -v
 
-          sha256sum build/app/outputs/flutter-apk/app-release.apk
+      - name: Flutter Clean
+        run: flutter clean
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: android-release-${{ github.run_number }}
-          name: YAAS Android Release ${{ github.run_number }}
-          files: build/app/outputs/flutter-apk/app-release.apk
-          generate_release_notes: true
+      - name: Flutter Pub Get
+        run: flutter pub get
+
+      - name: Rinf Generate
+        run: rinf gen
+
+      - name: Check Android
+        run: flutter build apk --debug
