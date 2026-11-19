@@ -19,7 +19,7 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -50,6 +50,11 @@ jobs:
         run: |
           echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/28.2.13676358" >> "$GITHUB_ENV"
+
+      - name: Check Java
+        run: |
+          java -version
+          javac -version
 
       - name: Check Internet
         run: |
@@ -82,7 +87,7 @@ jobs:
         run: |
           if [ -f test/widget_test.dart ]; then
             rm -f test/widget_test.dart
-            echo "Removed generated Flutter template test"
+            echo "Removed generated widget_test.dart"
           else
             echo "No generated widget_test.dart found"
           fi
@@ -160,9 +165,13 @@ jobs:
 
       - name: Verify Android project
         run: |
+          set -e
+
           test -f android/app/build.gradle || test -f android/app/build.gradle.kts
           test -f android/app/src/main/AndroidManifest.xml
-          grep -q "android.permission.INTERNET" android/app/src/main/AndroidManifest.xml
+
+          grep -q "android.permission.INTERNET" \
+            android/app/src/main/AndroidManifest.xml
 
           echo "Android project OK"
           echo "Internet permission OK"
@@ -175,6 +184,8 @@ jobs:
 
       - name: Verify APK exists
         run: |
+          set -e
+
           APK="build/app/outputs/flutter-apk/app-release.apk"
 
           test -f "$APK"
@@ -184,6 +195,8 @@ jobs:
 
       - name: Verify APK integrity
         run: |
+          set -e
+
           APK="build/app/outputs/flutter-apk/app-release.apk"
 
           unzip -tq "$APK"
@@ -192,9 +205,12 @@ jobs:
 
       - name: Verify APK permissions
         run: |
+          set -e
+
           APK="build/app/outputs/flutter-apk/app-release.apk"
 
-          "$ANDROID_HOME/build-tools/35.0.0/aapt2" dump permissions "$APK" \
+          "$ANDROID_HOME/build-tools/35.0.0/aapt2" \
+            dump permissions "$APK" \
             | tee apk-permissions.txt
 
           grep -q "android.permission.INTERNET" apk-permissions.txt
@@ -203,6 +219,8 @@ jobs:
 
       - name: Verify APK architecture
         run: |
+          set -e
+
           APK="build/app/outputs/flutter-apk/app-release.apk"
 
           unzip -l "$APK" | grep "lib/arm64-v8a/" || {
@@ -214,23 +232,36 @@ jobs:
 
       - name: Verify APK alignment
         run: |
+          set -e
+
           APK="build/app/outputs/flutter-apk/app-release.apk"
 
           "$ANDROID_HOME/build-tools/35.0.0/zipalign" \
             -c -P 16 -v 4 "$APK"
 
+          echo "APK alignment OK"
+
       - name: Verify APK signature
         run: |
+          set -e
+
           APK="build/app/outputs/flutter-apk/app-release.apk"
 
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify \
-            --verbose "$APK"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" \
+            verify \
+            --verbose \
+            "$APK"
+
+          echo "APK signature OK"
 
       - name: APK information
         run: |
+          set -e
+
           APK="build/app/outputs/flutter-apk/app-release.apk"
 
-          "$ANDROID_HOME/build-tools/35.0.0/aapt2" dump badging "$APK" \
+          "$ANDROID_HOME/build-tools/35.0.0/aapt2" \
+            dump badging "$APK" \
             | tee apk-badging.txt
 
       - name: Upload APK
