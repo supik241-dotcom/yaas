@@ -186,7 +186,6 @@ pub(super) struct RcloneCli {
     config_path: PathBuf,
     sys_proxy: Option<String>,
     bandwidth_limit: String,
-    config_password: Option<String>,
 }
 
 impl RcloneCli {
@@ -222,16 +221,7 @@ impl RcloneCli {
             config_path,
             sys_proxy,
             bandwidth_limit,
-            config_password: None,
         }
-    }
-
-    pub(super) fn set_config_password(
-        &mut self,
-        password: Option<String>,
-    ) {
-        self.config_password =
-            password.filter(|p| !p.is_empty());
     }
 
     pub(super) fn set_bandwidth_limit(&mut self, limit: String) {
@@ -251,10 +241,6 @@ impl RcloneCli {
         if let Some(proxy) = &self.sys_proxy {
             command.env("http_proxy", proxy);
             command.env("https_proxy", proxy);
-        }
-
-        if let Some(password) = &self.config_password {
-            command.env("RCLONE_CONFIG_PASS", password);
         }
 
         command.arg("--config").arg(&self.config_path);
@@ -581,20 +567,17 @@ fn filter_remotes_with_regex(
     }
 }
 
-#[instrument(level = "debug", skip(config_password), ret, err)]
+#[instrument(level = "debug", ret, err)]
 pub(crate) async fn list_remotes(
     rclone_path: &Path,
     config_path: &Path,
     remote_filter_regex: Option<&str>,
-    config_password: Option<String>,
 ) -> Result<Vec<String>> {
-    let mut cli = RcloneCli::new(
+    let cli = RcloneCli::new(
         rclone_path.to_path_buf(),
         config_path.to_path_buf(),
         String::new(),
     );
-
-    cli.set_config_password(config_password);
 
     let remotes = cli.remotes().await?;
 
