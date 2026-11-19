@@ -54,21 +54,23 @@ jobs:
       - name: Check Internet
         run: |
           set -e
+
           curl -I --max-time 20 https://github.com
           curl -I --max-time 20 https://pub.dev
+
           echo "Internet connection OK"
 
       - name: Check Android SDK
-  run: |
-    set -e
+        run: |
+          set -e
 
-    sdkmanager --list | head -100
+          sdkmanager --list | head -100
 
-    adb version
+          adb version
 
-    "$ANDROID_HOME/build-tools/35.0.0/aapt2" version
+          "$ANDROID_HOME/build-tools/35.0.0/aapt2" version
 
-    echo "Android SDK check OK"
+          echo "Android SDK check OK"
 
       - name: Create Android platform
         run: |
@@ -139,6 +141,7 @@ jobs:
       - name: Regenerate Rinf bindings
         run: |
           rinf gen
+
           test -f lib/src/bindings/bindings.dart
           test -f lib/src/bindings/signals/signals.dart
 
