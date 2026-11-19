@@ -34,7 +34,6 @@ impl FFARepo {
         cfg: &FfaConfig,
         cache_dir: &Path,
         settings: &Settings,
-        config_password: Option<String>,
         cancel: &CancellationToken,
     ) -> Result<(Self, Option<String>)> {
         if cfg.donation_target().is_some()
@@ -53,7 +52,6 @@ impl FFARepo {
             .run_until_cancelled(pick_remote_name(
                 &rclone_path,
                 &rclone_config_path,
-                config_password.clone(),
                 cfg.remote_name_filter_regex.as_deref(),
                 &settings.rclone_remote_name,
                 !cfg.disable_randomize_remote,
@@ -71,7 +69,6 @@ impl FFARepo {
             remote,
             settings.bandwidth_limit.clone(),
             cfg.remote_name_filter_regex.clone(),
-            config_password,
         );
 
         Ok((Self { config: cfg.clone(), storage }, persist))
@@ -280,11 +277,10 @@ impl FFARepo {
     }
 }
 
-#[instrument(level = "debug", skip(config_password), err)]
+#[instrument(level = "debug", err)]
 async fn pick_remote_name(
     rclone_path: &Path,
     rclone_config_path: &Path,
-    config_password: Option<String>,
     remote_filter_regex: Option<&str>,
     current_remote: &str,
     allow_randomize: bool,
@@ -293,7 +289,6 @@ async fn pick_remote_name(
         rclone_path,
         rclone_config_path,
         remote_filter_regex,
-        config_password,
     )
     .await?;
 
