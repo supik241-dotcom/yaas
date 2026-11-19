@@ -1,3 +1,4 @@
+
 name: Android Check
 
 on:
@@ -22,6 +23,17 @@ jobs:
         with:
           flutter-version: '3.50.0'
           channel: stable
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: stable
+
+      - name: Install Rinf CLI
+        run: |
+          cargo install rinf_cli --version 8.10.1 --locked
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          rinf --version
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
