@@ -87,7 +87,6 @@ class DownloaderSetupDialog extends StatefulWidget {
 
 class _DownloaderSetupDialogState extends State<DownloaderSetupDialog> {
   final _SensitiveUrlController _urlController = _SensitiveUrlController();
-  final TextEditingController _passwordController = TextEditingController();
 
   StreamSubscription<RustSignalPack<DownloaderConfigInstallResult>>?
       _installSub;
@@ -95,11 +94,7 @@ class _DownloaderSetupDialogState extends State<DownloaderSetupDialog> {
   StreamSubscription<RustSignalPack<DownloaderSourceRemovedResult>>?
       _removeSub;
 
-  StreamSubscription<RustSignalPack<DownloaderAvailabilityChanged>>?
-      _availabilitySub;
-
   bool _isAdding = false;
-  bool _isRetrying = false;
   String? _removingSourceId;
   String? _hoveredSourceId;
   bool _showAddSection = false;
@@ -165,27 +160,14 @@ class _DownloaderSetupDialogState extends State<DownloaderSetupDialog> {
 
     _removeSub =
         DownloaderSourceRemovedResult.rustSignalStream.listen(_onRemoveResult);
-
-    _availabilitySub =
-        DownloaderAvailabilityChanged.rustSignalStream.listen((event) {
-      if (!mounted) return;
-
-      if (!event.message.initializing) {
-        setState(() {
-          _isRetrying = false;
-        });
-      }
-    });
   }
 
   @override
   void dispose() {
     _installSub?.cancel();
     _removeSub?.cancel();
-    _availabilitySub?.cancel();
 
     _urlController.dispose();
-    _passwordController.dispose();
 
     super.dispose();
   }
@@ -203,11 +185,6 @@ class _DownloaderSetupDialogState extends State<DownloaderSetupDialog> {
     }
 
     return Uri.tryParse(url)?.hasAbsolutePath ?? false;
-  }
-
-  String? get _passwordOrNull {
-    final value = _passwordController.text;
-    return value.isEmpty ? null : value;
   }
 
   void _onAddPressed() {
@@ -229,19 +206,6 @@ class _DownloaderSetupDialogState extends State<DownloaderSetupDialog> {
 
     InstallDownloaderConfigFromUrlRequest(
       url: url,
-      rcloneConfigPassword: _passwordOrNull,
-    ).sendSignalToRust();
-  }
-
-  void _onRetryPressed() {
-    if (_isRetrying) return;
-
-    setState(() {
-      _isRetrying = true;
-    });
-
-    RetryDownloaderInitRequest(
-      rcloneConfigPassword: _passwordOrNull,
     ).sendSignalToRust();
   }
 
@@ -258,7 +222,6 @@ class _DownloaderSetupDialogState extends State<DownloaderSetupDialog> {
         _showAddSection = false;
         _errorText = null;
         _urlController.clear();
-        _passwordController.clear();
       });
     } else {
       final l10n = AppLocalizations.of(context);
@@ -485,16 +448,11 @@ class _DownloaderSetupDialogState extends State<DownloaderSetupDialog> {
         final selectedId = settingsState.downloaderConfigId;
 
         final busy = _isAdding ||
-            _isRetrying ||
             _removingSourceId != null ||
             settingsState.isDownloaderSourcesRefreshing;
 
         final showAddSection =
             _showAddSection || sources.isEmpty || _errorText != null;
-
-        final hasDownloaderError =
-            settingsState.downloaderError != null &&
-            settingsState.downloaderError!.isNotEmpty;
 
         return AlertDialog(
           title: Row(
@@ -588,56 +546,9 @@ class _DownloaderSetupDialogState extends State<DownloaderSetupDialog> {
                             ),
                           ),
                   ),
-
-                  // Пароль для повторной инициализации.
-                  if (hasDownloaderError) ...[
-                    const SizedBox(height: 12),
-                    const Divider(),
-                    const SizedBox(height: 8),
-                    Text(
-                      'Downloader initialization failed. Enter the rclone config password and retry.',
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color: Theme.of(context).colorScheme.error,
-                          ),
-                    ),
-                    const SizedBox(height: 8),
-                    TextField(
-                      controller: _passwordController,
-                      obscureText: true,
-                      enabled: !_isRetrying,
-                      decoration: const InputDecoration(
-                        labelText: 'Rclone config password',
-                        border: OutlineInputBorder(),
-                        prefixIcon: Icon(Icons.lock_outline),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: FilledButton.icon(
-                        onPressed: busy ? null : _onRetryPressed,
-                        icon: _isRetrying
-                            ? const SizedBox(
-                                width: 16,
-                                height: 16,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : const Icon(Icons.refresh),
-                        label: Text(
-                          _isRetrying
-                              ? 'Retrying...'
-                              : 'Retry initialization',
-                        ),
-                      ),
-                    ),
-                  ],
-
                   const SizedBox(height: 12),
                   const Divider(height: 1),
                   const SizedBox(height: 8),
-
                   InkWell(
                     borderRadius: BorderRadius.circular(8),
                     onTap: (busy && !showAddSection) || sources.isEmpty
@@ -681,7 +592,6 @@ class _DownloaderSetupDialogState extends State<DownloaderSetupDialog> {
                       ),
                     ),
                   ),
-
                   AnimatedSize(
                     duration: const Duration(milliseconds: 180),
                     curve: Curves.easeInOut,
@@ -698,31 +608,19 @@ class _DownloaderSetupDialogState extends State<DownloaderSetupDialog> {
                                   controller: _urlController,
                                   enabled: !busy,
                                   autofocus: sources.isEmpty,
-                                  decoration:
-                                      _buildUrlInputDecoration(l10n),
-                                  onChanged: (_) {
-                                    if (_errorText != null) {
-                                      setState(() {
-                                        _errorText = null;
-                                      });
-                                    } else {
-                                      setState(() {});
-                                    }
-                                  },
-                                ),
-                                const SizedBox(height: 10),
-                                TextField(
-                                  controller: _passwordController,
-                                  enabled: !busy,
-                                  obscureText: true,
-                                  decoration: const InputDecoration(
-                                    labelText: 'Rclone config password',
-                                    hintText: 'Optional',
-                                    border: OutlineInputBorder(),
-                                    prefixIcon: Icon(Icons.lock_outline),
-                                  ),
-                                ),
-                                const SizedBox(height: 10),
+
+decoration: _buildUrlInputDecoration(l10n),
+onChanged: (_) {
+  if (_errorText != null) {
+    setState(() {
+      _errorText = null;
+    });
+  } else {
+    setState(() {});
+  }
+},
+),
+const SizedBox(height: 10),
                                 Align(
                                   alignment: Alignment.centerRight,
                                   child: FilledButton(
@@ -773,3 +671,4 @@ class _DownloaderSetupDialogState extends State<DownloaderSetupDialog> {
     );
   }
 }
+                    
