@@ -1,4 +1,3 @@
-
 name: YAAS Android Release
 
 on:
@@ -8,131 +7,100 @@ on:
       - android-port
       - master
 
-permissions:
-  contents: read
-
 jobs:
-  build-android:
-    name: Build and verify Android APK
+  android-release:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
 
     steps:
-      # 1. Исходники
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2. Java
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      # 3. Flutter
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.50.0'
           channel: stable
-          cache: true
 
-      # 4. Rust
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           build-warnings: ""
 
-      # 5. Rinf CLI и Cargo NDK
-      - name: Install Rust tools
+      - name: Install Rinf CLI
         run: |
           cargo install rinf_cli --version 8.10.1 --locked
-          cargo install cargo-ndk --locked
-
-          rustup target add aarch64-linux-android
-
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
           rinf --help
-          cargo ndk --help
 
-      # 6. Android SDK и NDK
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 12266719
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: true
+          packages: platform-tools platforms;android-35 build-tools;35.0.0 ndk;28.2.13676358
 
-      - name: Install Android components
+      - name: Set Android SDK variables
         run: |
-          sdkmanager --install \
-            "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0" \
-            "ndk;28.2.13676358"
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/28.2.13676358" >> "$GITHUB_ENV"
 
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
-          echo "$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_PATH"
-
-      # 7. Проверка интернета на сервере сборки
-      - name: Check Internet connection
+      - name: Check Internet
         run: |
-          echo "Checking GitHub..."
-          curl -fsSI --retry 3 --max-time 30 https://github.com
+          set -e
+          curl -I --max-time 20 https://github.com
+          curl -I --max-time 20 https://pub.dev
+          echo "Internet connection OK"
 
-          echo "Checking pub.dev..."
-          curl -fsSI --retry 3 --max-time 30 https://pub.dev
-
-          echo "Internet connection: OK"
-
-      # 8. Создание Android-проекта
-      - name: Generate Android project
+      - name: Check Android SDK
         run: |
-          if [ ! -f android/app/build.gradle ] && \
-             [ ! -f android/app/build.gradle.kts ]; then
+          sdkmanager --list | head -100
+          adb version
+          aapt2 version
+
+      - name: Create Android platform
+        run: |
+          if [ ! -f android/app/build.gradle ] && [ ! -f android/app/build.gradle.kts ]; then
             flutter create --platforms=android --org com.skrimix .
           fi
 
-          test -d android
-          test -d android/app
-
-      # 9. Разрешение доступа к интернету для APK
-      - name: Enable Android Internet permission
+      - name: Add Internet permission
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          import re
 
-          path = Path("android/app/src/main/AndroidManifest.xml")
-          content = path.read_text()
+          manifest = Path("android/app/src/main/AndroidManifest.xml")
 
-          permission = 'android.permission.INTERNET'
+          if not manifest.exists():
+              raise SystemExit("AndroidManifest.xml not found")
 
-          if permission not in content:
-              content, count = re.subn(
-                  r'(<application\b)',
-                  '    <uses-permission android:name="android.permission.INTERNET" />\n    \\1',
-                  content,
-                  count=1
+          text = manifest.read_text()
+
+          permission = '<uses-permission android:name="android.permission.INTERNET"/>'
+
+          if "android.permission.INTERNET" not in text:
+              text = text.replace(
+                  "<application",
+                  permission + "\n    <application",
+                  1
               )
+              manifest.write_text(text)
 
-              if count != 1:
-                  raise SystemExit("Could not insert INTERNET permission")
-
-              path.write_text(content)
-
-          if permission not in path.read_text():
-              raise SystemExit("INTERNET permission is missing")
-
-          print("Android INTERNET permission: OK")
+          print("INTERNET permission checked")
           PY
 
-      # 10. Проверка Flutter
       - name: Flutter Doctor
         run: flutter doctor -v
 
-      # 11. Получение зависимостей
-      - name: Flutter Pub Get
+      - name: Flutter dependencies
         run: flutter pub get --enforce-lockfile
 
-      # 12. Генерация Rinf
       - name: Generate Rinf bindings
         run: |
           rinf gen
@@ -140,139 +108,124 @@ jobs:
           test -f lib/src/bindings/bindings.dart
           test -f lib/src/bindings/signals/signals.dart
 
-          echo "Rinf bindings: OK"
+          echo "Rinf bindings generated successfully"
 
-      # 13. Генерация локализации
       - name: Generate localization
         run: flutter gen-l10n
 
-      # 14. Проверка Rclone
       - name: Test Rclone
         run: |
           cargo test --locked -p hub downloader::rclone
 
-      # 15. Проверка обновления конфигурации Rclone
-      - name: Test Rclone configuration refresh
+      - name: Test Rclone config refresh
         run: |
-          cargo test --locked -p hub \
-            manual_refresh_updates_runtime_files_at_unchanged_urls
+          cargo test --locked -p hub manual_refresh_updates_runtime_files_at_unchanged_urls
 
-      # 16. Проверка Flutter
       - name: Flutter tests
         run: flutter test
 
-      # 17. Очистка
-      - name: Flutter Clean
+      - name: Clean Flutter
         run: flutter clean
 
-      # 18. Повторная подготовка
-      - name: Prepare Flutter
-        run: |
-          flutter pub get --enforce-lockfile
-          rinf gen
-          flutter gen-l10n
+      - name: Restore Flutter dependencies
+        run: flutter pub get --enforce-lockfile
 
-      # 19. Проверка Android-файлов
+      - name: Regenerate Rinf bindings
+        run: |
+          rinf gen
+          test -f lib/src/bindings/bindings.dart
+          test -f lib/src/bindings/signals/signals.dart
+
+      - name: Regenerate localization
+        run: flutter gen-l10n
+
       - name: Verify Android project
         run: |
-          test -f android/app/build.gradle || \
-          test -f android/app/build.gradle.kts
-
+          test -f android/app/build.gradle || test -f android/app/build.gradle.kts
           test -f android/app/src/main/AndroidManifest.xml
+          grep -q "android.permission.INTERNET" android/app/src/main/AndroidManifest.xml
 
-          grep -q "android.permission.INTERNET" \
-            android/app/src/main/AndroidManifest.xml
+          echo "Android project OK"
+          echo "Internet permission OK"
 
-          echo "Android project: OK"
-
-      # 20. Сборка Release APK
-      - name: Build Release APK
+      - name: Build Android ARM64 APK
         run: |
           flutter build apk \
             --release \
             --target-platform android-arm64
 
-      # 21. Поиск APK
-      - name: Locate APK
-        run: |
-          find build/app/outputs/flutter-apk \
-            -type f -name "*.apk"
-
-          test -f build/app/outputs/flutter-apk/app-release.apk
-
-      # 22. Подготовка проверки APK
-      - name: Prepare APK verification
-        run: |
-          BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
-
-          echo "BUILD_TOOLS=$BUILD_TOOLS" >> "$GITHUB_ENV"
-
-          "$BUILD_TOOLS/aapt2" version
-          "$BUILD_TOOLS/apksigner" --version
-
-      # 23. Проверка APK
-      - name: Verify APK
+      - name: Verify APK exists
         run: |
           APK="build/app/outputs/flutter-apk/app-release.apk"
 
-          echo "===== APK INFORMATION ====="
+          test -f "$APK"
+
+          echo "APK found:"
           ls -lh "$APK"
 
-          echo "===== ZIP INTEGRITY ====="
+      - name: Verify APK integrity
+        run: |
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+
           unzip -tq "$APK"
 
-          echo "===== ANDROID MANIFEST ====="
-          "$BUILD_TOOLS/aapt2" dump permissions "$APK"
+          echo "APK ZIP integrity OK"
 
-          "$BUILD_TOOLS/aapt2" dump permissions "$APK" \
-            | grep -q "android.permission.INTERNET"
+      - name: Verify APK permissions
+        run: |
+          APK="build/app/outputs/flutter-apk/app-release.apk"
 
-          echo "INTERNET permission: OK"
+          "$ANDROID_HOME/build-tools/35.0.0/aapt2" dump permissions "$APK" \
+            | tee apk-permissions.txt
 
-          echo "===== APK PACKAGE ====="
-          "$BUILD_TOOLS/aapt2" dump badging "$APK" \
-            | tee apk-badging.txt
+          grep -q "android.permission.INTERNET" apk-permissions.txt
 
-          grep -q "^package:" apk-badging.txt
+          echo "INTERNET permission is present"
 
-          echo "===== ARM64 CHECK ====="
-          unzip -Z1 "$APK" | grep "lib/arm64-v8a/"
+      - name: Verify APK architecture
+        run: |
+          APK="build/app/outputs/flutter-apk/app-release.apk"
 
-          unzip -Z1 "$APK" \
-            | grep -q "^lib/arm64-v8a/"
+          unzip -l "$APK" | grep "lib/arm64-v8a/" || {
+            echo "ARM64 native libraries were not found"
+            exit 1
+          }
 
-          echo "ARM64: OK"
+          echo "ARM64 architecture OK"
 
-          echo "===== ZIPALIGN CHECK ====="
-          "$BUILD_TOOLS/zipalign" \
+      - name: Verify APK alignment
+        run: |
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+
+          "$ANDROID_HOME/build-tools/35.0.0/zipalign" \
             -c -P 16 -v 4 "$APK"
 
-          echo "ZIPALIGN: OK"
+      - name: Verify APK signature
+        run: |
+          APK="build/app/outputs/flutter-apk/app-release.apk"
 
-          echo "===== SIGNATURE CHECK ====="
-          "$BUILD_TOOLS/apksigner" verify \
-            --verbose \
-            --print-certs "$APK"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify \
+            --verbose "$APK"
 
-          echo "SIGNATURE: OK"
+      - name: APK information
+        run: |
+          APK="build/app/outputs/flutter-apk/app-release.apk"
 
-          echo "===== ALL APK CHECKS PASSED ====="
+          "$ANDROID_HOME/build-tools/35.0.0/aapt2" dump badging "$APK" \
+            | tee apk-badging.txt
 
-      # 24. Сохраняем APK
-      - name: Upload Release APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: YAAS-Android-Release-arm64
           path: build/app/outputs/flutter-apk/app-release.apk
-          if-no-files-found: error
           retention-days: 30
 
-      # 25. Сохраняем отчёт проверки
-      - name: Upload APK verification report
-        if: always()
+      - name: Upload APK report
         uses: actions/upload-artifact@v4
         with:
-          name: YAAS-Android-verification
-          path: apk-badging.txt
-          if-no-files-found: ignore
+          name: YAAS-Android-APK-Report
+          path: |
+            apk-permissions.txt
+            apk-badging.txt
           retention-days: 30
