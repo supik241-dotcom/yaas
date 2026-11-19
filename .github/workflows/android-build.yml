@@ -59,10 +59,16 @@ jobs:
           echo "Internet connection OK"
 
       - name: Check Android SDK
-        run: |
-          sdkmanager --list | head -100
-          adb version
-          aapt2 version
+  run: |
+    set -e
+
+    sdkmanager --list | head -100
+
+    adb version
+
+    "$ANDROID_HOME/build-tools/35.0.0/aapt2" version
+
+    echo "Android SDK check OK"
 
       - name: Create Android platform
         run: |
