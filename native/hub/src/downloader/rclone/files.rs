@@ -1,4 +1,3 @@
-
 use std::{
     error::Error,
     path::{Path, PathBuf},
@@ -44,6 +43,7 @@ pub(crate) async fn prepare_rclone_files(
 
         if !is_http_url(&bin_source) {
             info!("Using local rclone binary and config");
+
             return Ok((
                 PathBuf::from(bin_source),
                 PathBuf::from(config_source),
@@ -99,35 +99,65 @@ pub(crate) async fn prepare_rclone_files(
 }
 
 #[cfg(target_os = "android")]
-fn bundled_android_rclone_path() -> Result<PathBuf> {
-    let maps = std::fs::read_to_string("/proc/self/maps")
-        .context("Failed to inspect loaded Android libraries")?;
+fn bundled_android_rclone_path() -> Result<Option<PathBuf>> {
+    /*
+     * Android does not always expose libhub.so in /proc/self/maps
+     * under the name expected by the old implementation.
+     *
+     * Instead of requiring:
+     *
+     *     libhub.so -> librclone.so
+     *
+     * we directly search loaded libraries for librclone.so.
+     */
 
-    for line in maps.lines() {
-        let Some(mapped_path) = line.split_whitespace().last() else {
-            continue;
-        };
+    if let Ok(maps) = std::fs::read_to_string("/proc/self/maps") {
+        for line in maps.lines() {
+            let Some(mapped_path) = line.split_whitespace().last() else {
+                continue;
+            };
 
-        if mapped_path.ends_with("/libhub.so") {
-            let native_dir = Path::new(mapped_path)
-                .parent()
-                .context("YAAS native library path has no parent")?;
+            if mapped_path.ends_with("/librclone.so") {
+                let path = PathBuf::from(mapped_path);
 
-            let rclone = native_dir.join("librclone.so");
+                if path.is_file() {
+                    info!(
+                        path = %path.display(),
+                        "Found bundled Android rclone library"
+                    );
 
-            ensure!(
-                rclone.is_file(),
-                "Bundled Android rclone not found: {}",
-                rclone.display()
+                    return Ok(Some(path));
+                }
+            }
+        }
+    } else {
+        debug!("Could not read /proc/self/maps");
+    }
+
+    /*
+     * Fallback locations for Android native libraries.
+     *
+     * These are intentionally checked only if /proc/self/maps did not
+     * provide a usable librclone.so path.
+     */
+    let fallback_paths = [
+        PathBuf::from("/data/data/com.example.yaas/lib/librclone.so"),
+        PathBuf::from("/data/app/lib/librclone.so"),
+        PathBuf::from("/data/local/tmp/librclone.so"),
+    ];
+
+    for path in fallback_paths {
+        if path.is_file() {
+            info!(
+                path = %path.display(),
+                "Found bundled Android rclone in fallback location"
             );
 
-            return Ok(rclone);
+            return Ok(Some(path));
         }
     }
 
-    anyhow::bail!(
-        "Could not locate libhub.so; cannot find bundled Android rclone"
-    )
+    Ok(None)
 }
 
 #[cfg(target_os = "android")]
@@ -138,16 +168,89 @@ async fn prepare_android_rclone_files(
 ) -> Result<(PathBuf, PathBuf)> {
     ensure!(!cancel.is_cancelled(), "Downloader initialization cancelled");
 
-    let bin_path = bundled_android_rclone_path()?;
     let config_source = cfg.rclone_config_path.as_str();
 
-    if !is_http_url(config_source) {
-        return Ok((
-            bin_path,
-            PathBuf::from(config_source),
-        ));
+    /*
+     * First try the rclone library bundled inside the Android package.
+     */
+    if let Some(bin_path) = bundled_android_rclone_path()? {
+        if !is_http_url(config_source) {
+            info!("Using APK-bundled Android rclone and local config");
+
+            return Ok((
+                bin_path,
+                PathBuf::from(config_source),
+            ));
+        }
+
+        let conf_dst = cache_dir.join("rclone.conf");
+        let client = build_http_client()?;
+
+        ensure_remote_file(
+            &client,
+            config_source,
+            &conf_dst,
+            cache_dir,
+            false,
+            "rclone config",
+            cancel,
+        )
+        .await?;
+
+        info!("Using APK-bundled Android rclone");
+
+        return Ok((bin_path, conf_dst));
     }
 
+    /*
+     * If the APK does not contain librclone.so, use the configured
+     * rclone_path as a fallback.
+     *
+     * This is important because older Android builds could fail here
+     * with:
+     *
+     *     Could not locate libhub.so; cannot find bundled Android rclone
+     */
+    warn!(
+        "Bundled Android librclone.so was not found; falling back to configured rclone_path"
+    );
+
+    let bin_source = cfg.rclone_path.resolve_for_current_platform()?;
+
+    if !is_http_url(&bin_source) {
+        let bin_path = PathBuf::from(&bin_source);
+
+        ensure!(
+            bin_path.is_file(),
+            "Configured Android rclone binary does not exist: {}",
+            bin_path.display()
+        );
+
+        if !is_http_url(config_source) {
+            return Ok((
+                bin_path,
+                PathBuf::from(config_source),
+            ));
+        }
+
+        let conf_dst = cache_dir.join("rclone.conf");
+        let client = build_http_client()?;
+
+        ensure_remote_file(
+            &client,
+            config_source,
+            &conf_dst,
+            cache_dir,
+            false,
+            "rclone config",
+            cancel,
+        )
+        .await?;
+
+        return Ok((bin_path, conf_dst));
+    }
+
+    let bin_dst = cache_dir.join("rclone");
     let conf_dst = cache_dir.join("rclone.conf");
     let client = build_http_client()?;
 
@@ -162,9 +265,34 @@ async fn prepare_android_rclone_files(
     )
     .await?;
 
-    info!("Using APK-bundled Android rclone");
+    if is_zip_url(&bin_source) {
+        ensure_remote_rclone_from_zip(
+            &client,
+            &bin_source,
+            cache_dir,
+            &bin_dst,
+            cancel,
+        )
+        .await?;
+    } else {
+        ensure_remote_file(
+            &client,
+            &bin_source,
+            &bin_dst,
+            cache_dir,
+            true,
+            "rclone binary",
+            cancel,
+        )
+        .await?;
+    }
 
-    Ok((bin_path, conf_dst))
+    info!(
+        path = %bin_dst.display(),
+        "Using configured Android rclone"
+    );
+
+    Ok((bin_dst, conf_dst))
 }
 
 fn init_progress(bytes: u64, total: Option<u64>) {
@@ -183,7 +311,12 @@ fn build_http_client() -> Result<reqwest::Client> {
         .build()?)
 }
 
-#[instrument(level = "debug", skip(client), fields(src = %src, dst = %dst.display(), label = label), err)]
+#[instrument(
+    level = "debug",
+    skip(client),
+    fields(src = %src, dst = %dst.display(), label = label),
+    err
+)]
 async fn ensure_remote_file(
     client: &reqwest::Client,
     src: &str,
@@ -207,24 +340,38 @@ async fn ensure_remote_file(
         Ok(DownloadResult::NotModified) => {
             debug!("{} not modified, using cached copy", label);
         }
+
         Ok(DownloadResult::Downloaded(_entry)) => {
-            debug!(path = %dst.display(), "Updated {} cache", label);
+            debug!(
+                path = %dst.display(),
+                "Updated {} cache",
+                label
+            );
+
             if set_executable {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    let mut perms = fs::metadata(dst).await?.permissions();
+
+                    let mut perms =
+                        fs::metadata(dst).await?.permissions();
+
                     perms.set_mode(0o755);
-                    fs::set_permissions(dst, perms).await.ok();
+
+                    fs::set_permissions(dst, perms)
+                        .await
+                        .ok();
                 }
             }
         }
+
         Err(e) => {
             warn!(
                 error = e.as_ref() as &dyn Error,
                 "Failed to update {}, using cached copy if available",
                 label
             );
+
             ensure!(
                 dst.exists(),
                 "Failed to download {} and no cached copy available: {:#}",
@@ -237,7 +384,12 @@ async fn ensure_remote_file(
     Ok(())
 }
 
-#[instrument(level = "debug", skip(client), fields(url = %url, bin = %bin_dst.display()), err)]
+#[instrument(
+    level = "debug",
+    skip(client),
+    fields(url = %url, bin = %bin_dst.display()),
+    err
+)]
 async fn ensure_remote_rclone_from_zip(
     client: &reqwest::Client,
     url: &str,
@@ -270,18 +422,27 @@ async fn ensure_remote_rclone_from_zip(
                     (Ok(current), Ok(expected))
                         if current.trim() == expected.trim() =>
                     {
-                        debug!("Existing rclone binary matches stored checksum");
+                        debug!(
+                            "Existing rclone binary matches stored checksum"
+                        );
+
                         return Ok(());
                     }
+
                     _ => {
-                        warn!("Local rclone binary checksum missing/mismatch, re-extracting");
+                        warn!(
+                            "Local rclone binary checksum missing/mismatch, re-extracting"
+                        );
                     }
                 }
             } else if bin_dst.exists() {
-                debug!("Checksum file missing, re-extracting to ensure correctness");
+                debug!(
+                    "Checksum file missing, re-extracting to ensure correctness"
+                );
             }
 
             info!("Extracting rclone binary from cached zip");
+
             extract_rclone_from_zip(
                 &zip_path,
                 cache_dir,
@@ -290,13 +451,16 @@ async fn ensure_remote_rclone_from_zip(
             )
             .await?;
 
-            if let Err(e) = write_md5_file(bin_dst, &md5_path).await {
+            if let Err(e) =
+                write_md5_file(bin_dst, &md5_path).await
+            {
                 warn!(
                     error = e.as_ref() as &dyn Error,
                     "Failed to write rclone MD5 stamp"
                 );
             }
         }
+
         Ok(DownloadResult::Downloaded(_)) => {
             info!(
                 path = %zip_path.display(),
@@ -311,13 +475,16 @@ async fn ensure_remote_rclone_from_zip(
             )
             .await?;
 
-            if let Err(e) = write_md5_file(bin_dst, &md5_path).await {
+            if let Err(e) =
+                write_md5_file(bin_dst, &md5_path).await
+            {
                 warn!(
                     error = e.as_ref() as &dyn Error,
                     "Failed to write rclone MD5 stamp"
                 );
             }
         }
+
         Err(e) => {
             warn!(
                 error = e.as_ref() as &dyn Error,
@@ -339,7 +506,9 @@ async fn ensure_remote_rclone_from_zip(
                 )
                 .await?;
 
-                if let Err(e) = write_md5_file(bin_dst, &md5_path).await {
+                if let Err(e) =
+                    write_md5_file(bin_dst, &md5_path).await
+                {
                     warn!(
                         error = e.as_ref() as &dyn Error,
                         "Failed to write rclone MD5 stamp"
@@ -352,9 +521,15 @@ async fn ensure_remote_rclone_from_zip(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(bin_dst).await?.permissions();
+
+        let mut perms =
+            fs::metadata(bin_dst).await?.permissions();
+
         perms.set_mode(0o755);
-        fs::set_permissions(bin_dst, perms).await.ok();
+
+        fs::set_permissions(bin_dst, perms)
+            .await
+            .ok();
     }
 
     Ok(())
@@ -366,11 +541,17 @@ async fn extract_rclone_from_zip(
     bin_dst: &Path,
     cancel: &CancellationToken,
 ) -> Result<()> {
-    let entries = list_archive_file_paths(zip_path, Some(cancel))
-        .await
-        .with_context(|| {
-            format!("Failed to list entries of {}", zip_path.display())
-        })?;
+    let entries = list_archive_file_paths(
+        zip_path,
+        Some(cancel),
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "Failed to list entries of {}",
+            zip_path.display()
+        )
+    })?;
 
     let target_name = if cfg!(windows) {
         "rclone.exe"
@@ -381,7 +562,8 @@ async fn extract_rclone_from_zip(
     let mut candidates: Vec<&str> = entries
         .iter()
         .filter_map(|p| {
-            let last = p.rsplit('/').next().unwrap_or(p.as_str());
+            let last =
+                p.rsplit('/').next().unwrap_or(p.as_str());
 
             if last == target_name {
                 Some(p.as_str())
@@ -399,6 +581,7 @@ async fn extract_rclone_from_zip(
     );
 
     candidates.sort_by_key(|s| s.len());
+
     let chosen = candidates[0];
 
     extract_single_from_archive(
@@ -416,7 +599,8 @@ async fn extract_rclone_from_zip(
         )
     })?;
 
-    let extracted_path = cache_dir.join(target_name);
+    let extracted_path =
+        cache_dir.join(target_name);
 
     if extracted_path != bin_dst {
         fs::rename(&extracted_path, bin_dst)
@@ -440,9 +624,12 @@ async fn write_md5_file(
         .await
         .context("Failed to compute MD5")?;
 
-    fs::write(md5_path, md5.into_bytes())
-        .await
-        .context("Failed to write MD5 file")?;
+    fs::write(
+        md5_path,
+        md5.into_bytes(),
+    )
+    .await
+    .context("Failed to write MD5 file")?;
 
     Ok(())
 }
@@ -451,16 +638,23 @@ async fn write_md5_file(
 mod tests {
     use tempfile::tempdir;
     use wiremock::{
-        Mock, MockServer, ResponseTemplate,
+        Mock,
+        MockServer,
+        ResponseTemplate,
         matchers::{header, method, path},
     };
 
     use super::*;
     use crate::downloader::config::RclonePath;
 
-    fn cfg_local(bin: &str, conf: &str) -> FfaConfig {
+    fn cfg_local(
+        bin: &str,
+        conf: &str,
+    ) -> FfaConfig {
         FfaConfig {
-            rclone_path: RclonePath::Single(bin.to_string()),
+            rclone_path: RclonePath::Single(
+                bin.to_string(),
+            ),
             rclone_config_path: conf.to_string(),
             disable_randomize_remote: true,
             ..Default::default()
@@ -470,38 +664,63 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn prepare_files_returns_local_paths_when_both_local() {
         let dir = tempdir().unwrap();
-        let cfg = cfg_local("/bin/echo", "/tmp/rclone.conf");
 
-        let (bin, conf) = prepare_rclone_files(
-            dir.path(),
-            &cfg,
-            &CancellationToken::new(),
-        )
-        .await
-        .expect("Prepare files failed");
+        let cfg = cfg_local(
+            "/bin/echo",
+            "/tmp/rclone.conf",
+        );
 
-        assert_eq!(bin, PathBuf::from("/bin/echo"));
-        assert_eq!(conf, PathBuf::from("/tmp/rclone.conf"));
+        let (bin, conf) =
+            prepare_rclone_files(
+                dir.path(),
+                &cfg,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("Prepare files failed");
+
+        assert_eq!(
+            bin,
+            PathBuf::from("/bin/echo")
+        );
+
+        assert_eq!(
+            conf,
+            PathBuf::from("/tmp/rclone.conf")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn prepare_files_downloads_and_caches_http() {
         let dir = tempdir().unwrap();
-        let server = MockServer::start().await;
+
+        let server =
+            MockServer::start().await;
 
         let conf_path = "/rclone.conf";
         let bin_path = "/rclone";
+
         let conf_etag = "\"conf-etag\"";
         let bin_etag = "\"bin-etag\"";
-        let last_modified = "Wed, 21 Oct 2015 07:28:00 GMT";
+
+        let last_modified =
+            "Wed, 21 Oct 2015 07:28:00 GMT";
 
         Mock::given(method("GET"))
             .and(path(conf_path))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .set_body_string("[remote]\nconfig=true")
-                    .insert_header("ETag", conf_etag)
-                    .insert_header("Last-Modified", last_modified),
+                    .set_body_string(
+                        "[remote]\nconfig=true",
+                    )
+                    .insert_header(
+                        "ETag",
+                        conf_etag,
+                    )
+                    .insert_header(
+                        "Last-Modified",
+                        last_modified,
+                    ),
             )
             .mount(&server)
             .await;
@@ -511,48 +730,79 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_string("binary")
-                    .insert_header("ETag", bin_etag)
-                    .insert_header("Last-Modified", last_modified),
+                    .insert_header(
+                        "ETag",
+                        bin_etag,
+                    )
+                    .insert_header(
+                        "Last-Modified",
+                        last_modified,
+                    ),
             )
             .mount(&server)
             .await;
 
         Mock::given(method("GET"))
             .and(path(conf_path))
-            .and(header("If-None-Match", conf_etag))
-            .and(header("If-Modified-Since", last_modified))
-            .respond_with(ResponseTemplate::new(304))
+            .and(header(
+                "If-None-Match",
+                conf_etag,
+            ))
+            .and(header(
+                "If-Modified-Since",
+                last_modified,
+            ))
+            .respond_with(
+                ResponseTemplate::new(304),
+            )
             .mount(&server)
             .await;
 
         Mock::given(method("GET"))
             .and(path(bin_path))
-            .and(header("If-None-Match", bin_etag))
-            .and(header("If-Modified-Since", last_modified))
-            .respond_with(ResponseTemplate::new(304))
+            .and(header(
+                "If-None-Match",
+                bin_etag,
+            ))
+            .and(header(
+                "If-Modified-Since",
+                last_modified,
+            ))
+            .respond_with(
+                ResponseTemplate::new(304),
+            )
             .mount(&server)
             .await;
 
         let cfg = FfaConfig {
-            rclone_path: RclonePath::Single(
-                format!("{}{}", server.uri(), bin_path),
-            ),
-            rclone_config_path: format!(
-                "{}{}",
-                server.uri(),
-                conf_path
-            ),
+            rclone_path:
+                RclonePath::Single(
+                    format!(
+                        "{}{}",
+                        server.uri(),
+                        bin_path
+                    ),
+                ),
+
+            rclone_config_path:
+                format!(
+                    "{}{}",
+                    server.uri(),
+                    conf_path
+                ),
+
             disable_randomize_remote: true,
             ..Default::default()
         };
 
-        let (bin, conf) = prepare_rclone_files(
-            dir.path(),
-            &cfg,
-            &CancellationToken::new(),
-        )
-        .await
-        .expect("First run failed");
+        let (bin, conf) =
+            prepare_rclone_files(
+                dir.path(),
+                &cfg,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("First run failed");
 
         assert!(bin.exists());
         assert!(conf.exists());
@@ -561,11 +811,12 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
 
-            let mode = tokio::fs::metadata(&bin)
-                .await
-                .unwrap()
-                .permissions()
-                .mode();
+            let mode =
+                tokio::fs::metadata(&bin)
+                    .await
+                    .unwrap()
+                    .permissions()
+                    .mode();
 
             assert!(
                 mode & 0o111 != 0,
@@ -573,13 +824,14 @@ mod tests {
             );
         }
 
-        let (bin2, conf2) = prepare_rclone_files(
-            dir.path(),
-            &cfg,
-            &CancellationToken::new(),
-        )
-        .await
-        .expect("Second run failed");
+        let (bin2, conf2) =
+            prepare_rclone_files(
+                dir.path(),
+                &cfg,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("Second run failed");
 
         assert_eq!(bin2, bin);
         assert_eq!(conf2, conf);
