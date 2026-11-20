@@ -1,4 +1,3 @@
-
 use std::{
     error::Error,
     fmt,
@@ -28,7 +27,10 @@ impl fmt::Debug for RcloneStorage {
         f.debug_struct("RcloneStorage")
             .field("remote", &self.remote)
             .field("root_dir", &self.root_dir)
-            .field("remote_filter_regex", &self.remote_filter_regex)
+            .field(
+                "remote_filter_regex",
+                &self.remote_filter_regex,
+            )
             .finish_non_exhaustive()
     }
 }
@@ -37,6 +39,7 @@ impl RcloneStorage {
     pub(crate) fn new(
         rclone_path: PathBuf,
         config_path: PathBuf,
+        rclone_config_password: Option<String>,
         root_dir: String,
         remote: String,
         bandwidth_limit: String,
@@ -57,8 +60,12 @@ impl RcloneStorage {
             None => None,
         };
 
-        let client =
-            RcloneCli::new(rclone_path, config_path, bandwidth_limit);
+        let client = RcloneCli::new(
+            rclone_path,
+            config_path,
+            rclone_config_password,
+            bandwidth_limit,
+        );
 
         Self {
             client,
@@ -76,7 +83,10 @@ impl RcloneStorage {
         self.remote = remote;
     }
 
-    pub(crate) fn set_bandwidth_limit(&mut self, limit: String) {
+    pub(crate) fn set_bandwidth_limit(
+        &mut self,
+        limit: String,
+    ) {
         self.client.set_bandwidth_limit(limit);
     }
 
@@ -84,22 +94,30 @@ impl RcloneStorage {
         format!(
             "{}:{}",
             self.remote,
-            PathBuf::from(self.root_dir.trim_end_matches(['/', '\\']))
-                .join(path)
-                .display()
+            PathBuf::from(
+                self.root_dir
+                    .trim_end_matches(['/', '\\'])
+            )
+            .join(path)
+            .display()
         )
     }
 
     /// Upload a single local file to an arbitrary remote and path.
     ///
     /// The file name from `local_path` is appended to `remote_dir`.
-    #[instrument(level = "debug", skip(self, stats_tx, cancellation_token))]
+    #[instrument(
+        level = "debug",
+        skip(self, stats_tx, cancellation_token)
+    )]
     pub(crate) async fn upload_file_to_remote(
         &self,
         local_path: &Path,
         remote: &str,
         remote_dir: &str,
-        stats_tx: Option<UnboundedSender<TransferStats>>,
+        stats_tx: Option<
+            UnboundedSender<TransferStats>,
+        >,
         cancellation_token: Option<CancellationToken>,
     ) -> Result<()> {
         ensure!(
@@ -107,7 +125,11 @@ impl RcloneStorage {
             "Local path is not a file: {}",
             local_path.display()
         );
-        ensure!(!remote.is_empty(), "Remote name must not be empty");
+
+        ensure!(
+            !remote.is_empty(),
+            "Remote name must not be empty"
+        );
 
         let file_name = local_path
             .file_name()
@@ -119,7 +141,11 @@ impl RcloneStorage {
                 )
             })?;
 
-        let dest = format_upload_destination(remote, remote_dir);
+        let dest =
+            format_upload_destination(
+                remote,
+                remote_dir,
+            );
 
         debug!(
             src = %local_path.display(),
@@ -140,7 +166,9 @@ impl RcloneStorage {
 
         self.client
             .transfer_with_stats(
-                local_path.display().to_string(),
+                local_path
+                    .display()
+                    .to_string(),
                 dest,
                 RcloneTransferOperation::Copy,
                 total_bytes,
@@ -152,7 +180,11 @@ impl RcloneStorage {
 
     #[instrument(
         level = "debug",
-        skip(self, stats_tx, cancellation_token),
+        skip(
+            self,
+            stats_tx,
+            cancellation_token
+        ),
         ret
     )]
     pub(crate) async fn download_dir_with_stats(
@@ -167,13 +199,16 @@ impl RcloneStorage {
             "Destination must have a parent directory"
         );
 
-        let remote_path = self.format_remote_path(&source);
+        let remote_path =
+            self.format_remote_path(&source);
 
         let total_bytes = self
             .client
             .size(&remote_path)
             .await
-            .context("Failed to get remote dir size")?
+            .context(
+                "Failed to get remote dir size"
+            )?
             .bytes;
 
         self.client
@@ -204,7 +239,9 @@ impl RcloneStorage {
         &self,
         source: String,
         dest: PathBuf,
-        cancellation_token: Option<CancellationToken>,
+        cancellation_token: Option<
+            CancellationToken,
+        >,
     ) -> Result<PathBuf> {
         ensure!(
             dest.is_dir(),
@@ -213,10 +250,15 @@ impl RcloneStorage {
 
         let local_leaf = PathBuf::from(&source)
             .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
+            .map(|s| {
+                s.to_string_lossy()
+                    .into_owned()
+            })
             .unwrap_or_else(|| source.clone());
 
-        let source = self.format_remote_path(&source);
+        let source =
+            self.format_remote_path(&source);
+
         let mut dest_path = dest.clone();
 
         debug!(
@@ -235,32 +277,53 @@ impl RcloneStorage {
             .await?;
 
         dest_path.push(local_leaf);
+
         Ok(dest_path)
     }
 
-    #[instrument(level = "debug", skip(self), ret, err)]
-    pub(crate) async fn remotes(&self) -> Result<Vec<String>> {
-        let remotes = self.client.remotes().await?;
+    #[instrument(
+        level = "debug",
+        skip(self),
+        ret,
+        err
+    )]
+    pub(crate) async fn remotes(
+        &self,
+    ) -> Result<Vec<String>> {
+        let remotes =
+            self.client.remotes().await?;
 
         Ok(filter_remotes_with_regex(
             remotes,
-            self.remote_filter_regex.as_ref(),
+            self.remote_filter_regex
+                .as_ref(),
         ))
     }
 }
 
-fn format_upload_destination(remote: &str, remote_dir: &str) -> String {
-    let remote_dir = normalize_relative_remote_path(remote_dir);
+fn format_upload_destination(
+    remote: &str,
+    remote_dir: &str,
+) -> String {
+    let remote_dir =
+        normalize_relative_remote_path(
+            remote_dir,
+        );
 
     if remote_dir.is_empty() {
         format!("{remote}:")
     } else {
-        format!("{remote}:{remote_dir}")
+        format!(
+            "{remote}:{remote_dir}"
+        )
     }
 }
 
-fn normalize_relative_remote_path(path: &str) -> String {
-    path.trim_matches(['/', '\\']).replace('\\', "/")
+fn normalize_relative_remote_path(
+    path: &str,
+) -> String {
+    path.trim_matches(['/', '\\'])
+        .replace('\\', "/")
 }
 
 fn filter_remotes_with_regex(
@@ -268,7 +331,10 @@ fn filter_remotes_with_regex(
     regex: Option<&Regex>,
 ) -> Vec<String> {
     if let Some(re) = regex {
-        remotes.into_iter().filter(|r| re.is_match(r)).collect()
+        remotes
+            .into_iter()
+            .filter(|r| re.is_match(r))
+            .collect()
     } else {
         remotes
     }
@@ -281,11 +347,18 @@ mod tests {
     #[test]
     fn upload_destination_is_remote_directory_for_rclone_copy() {
         assert_eq!(
-            format_upload_destination("FFA-DD", "_donations"),
+            format_upload_destination(
+                "FFA-DD",
+                "_donations"
+            ),
             "FFA-DD:_donations"
         );
+
         assert_eq!(
-            format_upload_destination("FFA-DD", "/_donations/"),
+            format_upload_destination(
+                "FFA-DD",
+                "/_donations/"
+            ),
             "FFA-DD:_donations"
         );
     }
@@ -293,11 +366,18 @@ mod tests {
     #[test]
     fn upload_destination_supports_remote_root() {
         assert_eq!(
-            format_upload_destination("FFA-DD", ""),
+            format_upload_destination(
+                "FFA-DD",
+                ""
+            ),
             "FFA-DD:"
         );
+
         assert_eq!(
-            format_upload_destination("FFA-DD", "/"),
+            format_upload_destination(
+                "FFA-DD",
+                "/"
+            ),
             "FFA-DD:"
         );
     }
@@ -305,7 +385,10 @@ mod tests {
     #[test]
     fn upload_destination_uses_remote_path_separators() {
         assert_eq!(
-            format_upload_destination("FFA-DD", r"uploads\donations"),
+            format_upload_destination(
+                "FFA-DD",
+                r"uploads\donations"
+            ),
             "FFA-DD:uploads/donations"
         );
     }
