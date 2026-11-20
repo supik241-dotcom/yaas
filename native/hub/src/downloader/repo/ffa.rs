@@ -52,6 +52,7 @@ impl FFARepo {
             .run_until_cancelled(pick_remote_name(
                 &rclone_path,
                 &rclone_config_path,
+                cfg.rclone_config_password(),
                 cfg.remote_name_filter_regex.as_deref(),
                 &settings.rclone_remote_name,
                 !cfg.disable_randomize_remote,
@@ -65,6 +66,7 @@ impl FFARepo {
         let storage = RcloneStorage::new(
             rclone_path,
             rclone_config_path,
+            cfg.rclone_config_password().map(str::to_owned),
             cfg.root_dir.clone(),
             remote,
             settings.bandwidth_limit.clone(),
@@ -281,6 +283,7 @@ impl FFARepo {
 async fn pick_remote_name(
     rclone_path: &Path,
     rclone_config_path: &Path,
+    rclone_config_password: Option<&str>,
     remote_filter_regex: Option<&str>,
     current_remote: &str,
     allow_randomize: bool,
@@ -288,6 +291,7 @@ async fn pick_remote_name(
     let remotes = rclone::list_remotes(
         rclone_path,
         rclone_config_path,
+        rclone_config_password,
         remote_filter_regex,
     )
     .await?;
@@ -342,7 +346,7 @@ async fn load_blacklist_from_remote(
             warn!(
                 error = e.as_ref() as &dyn Error,
                 path = remote_path,
-                "Failed to download donation blacklist, continuing without it"
+                "Failed to read donation blacklist file, continuing without it"
             );
 
             Ok(HashSet::new())
