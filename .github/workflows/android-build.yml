@@ -70,6 +70,7 @@ jobs:
           curl -I --max-time 20 https://github.com
           curl -I --max-time 20 https://pub.dev
           curl -I --max-time 20 https://repo.maven.apache.org/maven2
+          curl -fI --max-time 20 https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/2.3.20/kotlin-stdlib-2.3.20.pom
 
       - name: Create Android platform
         run: |
@@ -125,6 +126,25 @@ jobs:
           cat android/gradle/wrapper/gradle-wrapper.properties
 
           echo "Android Gradle configuration fixed"
+
+      # NEW: добавляем Maven Central в buildscript repositories
+      # для всех проектов, включая встроенный Gradle build Flutter.
+      - name: Configure Gradle dependency repositories
+        run: |
+          mkdir -p "$HOME/.gradle/init.d"
+
+          cat > "$HOME/.gradle/init.d/extra-repositories.gradle" <<'EOF'
+          gradle.beforeProject { project ->
+              project.buildscript.repositories {
+                  mavenCentral()
+                  google()
+                  gradlePluginPortal()
+              }
+          }
+          EOF
+
+          echo "Additional Gradle repositories configured:"
+          cat "$HOME/.gradle/init.d/extra-repositories.gradle"
 
       - name: Verify Gradle configuration
         working-directory: android
@@ -216,6 +236,8 @@ jobs:
           grep -q "9.3.1" android/settings.gradle.kts
           grep -q "gradle-9.5.0-bin.zip" \
             android/gradle/wrapper/gradle-wrapper.properties
+
+          test -f "$HOME/.gradle/init.d/extra-repositories.gradle"
 
           echo "Android configuration OK"
 
